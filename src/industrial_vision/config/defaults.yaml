@@ -1,0 +1,22 @@
+﻿model:
+  type: "simple_cnn"
+  input_channels: 3
+  num_classes: 10
+  image_size: [224, 224]
+  save_dir: "data/checkpoints"
+
+data:
+  raw_dir: "data/raw"
+  train_dir: "data/raw"
+  val_dir: "data/raw"
+  test_dir: "data/raw"
+
+training:
+  epochs: 5
+  batch_size: 8
+  learning_rate: 0.001
+  device: "cpu"
+
+logging:
+  level: "INFO"
+  log_dir: "logs"
