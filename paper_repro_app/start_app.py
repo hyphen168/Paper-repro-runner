@@ -9,7 +9,22 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent
 VENV_DIR = APP_DIR / ".venv"
 PYTHON_EXE = APP_DIR / r".venv\Scripts\python.exe"
-PORT = 8505
+DEFAULT_PORT = 8505
+
+
+def find_free_port(start_port: int = DEFAULT_PORT, max_tries: int = 20) -> int:
+    for port in range(start_port, start_port + max_tries):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("127.0.0.1", port))
+            return port
+        except OSError:
+            continue
+    return start_port
+
+
+PORT = find_free_port()
 LOCAL_URL = f"http://127.0.0.1:{PORT}"
 
 

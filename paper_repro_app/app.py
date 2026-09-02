@@ -265,38 +265,26 @@ def render_repro_progress(task: dict | None) -> None:
         "cancelled": "已结束",
         "unknown": "待配置",
     }
+    label = {
+        "prepare": "准备工作目录",
+        "clone": "拉取代码",
+        "env": "环境诊断",
+        "install": "安装依赖",
+        "verify": "执行验证",
+        "collect": "收集结果",
+    }.get(current, current)
 
     panel_html = f"""
-    <div class='panel' style='padding: 1rem; margin-top: 1rem; background: linear-gradient(135deg, rgba(9,18,31,0.86), rgba(22,12,27,0.9));'>
+    <div class='panel' style='padding: 1rem; margin-top: 1rem; background: linear-gradient(135deg, rgba(9,18,31,0.86), rgba(22,12,27,0.9)); position: sticky; top: 0.5rem; z-index: 2;'>
         <div class='panel-title'>复现过程可视化</div>
-        <div style='display:flex; align-items:center; justify-content:space-between; margin-bottom: 0.5rem; color: var(--muted); font-size:0.78rem;'>
-            <span>实时进度</span>
+        <div class='single-progress-meta'>
+            <span>当前阶段</span>
             <span style='color: var(--amber); font-weight: 700;'>{status_labels.get(status_value, '待开始')}</span>
         </div>
         <div class='progress-shell'><div class='progress-fill' style='width:{progress}%;'></div></div>
-        <div class='compact-progress'>
-            <div class='compact-step-row'>
-    """
-    step_html = []
-    for idx, step in enumerate(steps):
-        label = {
-            "prepare": "准备工作目录",
-            "clone": "拉取代码",
-            "env": "环境诊断",
-            "install": "安装依赖",
-            "verify": "执行验证",
-            "collect": "收集结果",
-        }.get(step, step)
-        if idx < current_idx:
-            tone = "compact-step done"
-        elif idx == current_idx:
-            tone = "compact-step active"
-        else:
-            tone = "compact-step"
-        step_html.append(f"<div class='{tone}'><span class='step-index'>{idx + 1}</span>{label}</div>")
-    panel_html += "".join(step_html)
-    panel_html += """
-            </div>
+        <div class='single-progress-meta'>
+            <span class='stage-pill'>{label}</span>
+            <span>{progress}%</span>
         </div>
     </div>
     """
@@ -528,11 +516,13 @@ def render_app() -> None:
         }
         .progress-shell {
             height: 14px;
+            width: 100%;
             background: rgba(255,255,255,0.06);
             border: 1px solid rgba(87,240,255,0.22);
             border-radius: 999px;
             overflow: hidden;
-            margin-bottom: 0.8rem;
+            margin: 0.5rem 0 0.7rem;
+            position: relative;
         }
         .progress-fill {
             height: 100%;
@@ -541,53 +531,26 @@ def render_app() -> None:
             box-shadow: 0 0 18px rgba(87,240,255,0.35);
             transition: width 0.35s ease;
         }
-        .compact-progress {
-            display: grid;
-            gap: 0.55rem;
-            margin-top: 0.5rem;
-        }
-        .compact-step-row {
+        .single-progress-meta {
             display: flex;
-            gap: 0.45rem;
-            overflow-x: auto;
-            padding-bottom: 0.25rem;
-            scrollbar-width: thin;
-        }
-        .compact-step {
-            flex: 0 0 auto;
-            display: inline-flex;
             align-items: center;
-            gap: 0.35rem;
-            padding: 0.35rem 0.55rem;
-            border-radius: 999px;
-            border: 1px solid rgba(86,240,255,0.22);
-            background: rgba(15,22,35,0.72);
+            justify-content: space-between;
+            gap: 0.8rem;
+            margin-top: 0.25rem;
             color: var(--muted);
-            font-size: 0.68rem;
-            white-space: nowrap;
+            font-size: 0.72rem;
         }
-        .compact-step.done {
-            border-color: rgba(127,245,201,0.5);
-            background: rgba(10,25,22,0.7);
-            color: var(--green);
-        }
-        .compact-step.active {
-            border-color: rgba(255,85,216,0.5);
-            background: rgba(34, 12, 29, 0.9);
-            color: var(--amber);
-            box-shadow: 0 0 18px rgba(255,85,216,0.18);
-        }
-        .step-index {
-            width: 22px;
-            height: 22px;
+        .stage-pill {
             display: inline-flex;
-            justify-content: center;
             align-items: center;
-            border-radius: 50%;
-            background: linear-gradient(135deg, rgba(87,240,255,0.24), rgba(143,126,255,0.2));
+            padding: 0.3rem 0.65rem;
+            border-radius: 999px;
+            border: 1px solid rgba(86,240,255,0.26);
+            background: rgba(10, 18, 32, 0.75);
             color: var(--cyan);
-            font-weight: 800;
-            font-size: 0.68rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            font-size: 0.64rem;
         }
         .floating-mini {
             background: rgba(10,16,28,0.76);
