@@ -1,0 +1,4 @@
+db_path: "paper_repro_app/data/tasks.db"
+app_title: "Paper Repro Runner"
+default_remote_workdir: "/workspace/paper-repro"
+default_data_dir: "~/data"

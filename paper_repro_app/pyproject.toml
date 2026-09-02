@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paper-repro-runner"
+version = "0.2.0"
+description = "Lightweight paper reproduction automation app with local control and remote cloud execution."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Copilot" }]
+dependencies = [
+  "streamlit>=1.34",
+  "pandas>=2.0",
+  "requests>=2.31",
+  "beautifulsoup4>=4.12",
+  "PyYAML>=6.0",
+  "paramiko>=3.4",
+  "pydantic>=2.7"
+]
+
+[project.scripts]
+paper-repro-runner = "paper_repro_app.app:main"
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
