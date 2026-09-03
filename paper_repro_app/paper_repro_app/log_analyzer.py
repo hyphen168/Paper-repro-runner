@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, Dict, List
 
@@ -72,18 +71,6 @@ class LogAnalyzer:
             }
 
         text = str(raw_log)
-        
-        # Parse JSON logs payload if present
-        json_payload = None
-        if text.strip().startswith("{") and text.strip().endswith("}"):
-            try:
-                json_payload = json.loads(text)
-            except Exception:
-                pass
-
-        stdout_log = text
-        if json_payload and isinstance(json_payload, dict):
-            stdout_log = json_payload.get("message") or json_payload.get("logs") or text
 
         # Locate failed step header
         failed_step = "未知"

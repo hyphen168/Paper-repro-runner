@@ -1,4 +1,9 @@
+import base64
 import importlib.util
+import json
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
@@ -13,12 +18,34 @@ from paper_repro_app.artifacts import ArtifactCollector
 from paper_repro_app.config_store import LocalConfigStore
 from paper_repro_app.database import TaskStore
 from paper_repro_app.diagnostics import EnvironmentDiagnostics
+from paper_repro_app.dataset_discovery import DatasetDiscovery
+from paper_repro_app.model_discovery import ModelDiscovery
 from paper_repro_app.innovation_analysis import PaperInnovationAnalyzer
-from paper_repro_app.paper_parser import extract_repo_url
 from paper_repro_app.project_summary import generate_project_summary
 from paper_repro_app.remote_runner import RemoteRunner
 from paper_repro_app.report_generator import generate_repro_report
 from paper_repro_app.comparison_table import generate_experiment_table
+
+
+def test_remote_pipeline_steps_are_valid_bash():
+    bash_path = shutil.which("bash")
+    if bash_path is None or "windowsapps" in Path(bash_path).parts[-2].lower():
+        return
+    runner = RemoteRunner({
+        "host": "example.com",
+        "user": "root",
+        "repo_url": "https://github.com/example/repro-project",
+        "remote_workdir": "/workspace/demo",
+        "environment_mode": "venv",
+    })
+    for step in runner.build_pipeline():
+        syntax_check = subprocess.run(
+            ["bash", "-n"],
+            input=step["command"].encode("utf-8"),
+            capture_output=True,
+            check=False,
+        )
+        assert syntax_check.returncode == 0, f"{step['id']}: {syntax_check.stderr.decode('utf-8', errors='replace')}"
 
 
 def test_task_store_round_trip(tmp_path):
@@ -67,6 +94,10 @@ def test_extract_repo_url_handles_known_hosts():
 def test_explicit_repo_hint_overrides_automatic_repo_detection():
     repo_url = "https://github.com/hyphen168/Yolov5m-NEU-DET.git"
     assert resolve_repo_url(repo_url, "https://huggingface.co/huggingface") == repo_url
+
+
+def test_app_does_not_expose_article_specific_training_command_builder():
+    assert not hasattr(APP_MODULE, "build_yolo_training_command")
 
 
 def test_generic_huggingface_detection_is_not_used_as_source_code_repo():
@@ -183,7 +214,10 @@ def test_remote_runner_uses_shallow_lfs_free_clone():
     assert "http.lowSpeedTime 45" in clone_command
     assert "timeout 13 git ls-remote --heads" in clone_command
     assert "timeout 600 git clone" in clone_command
-    assert "界面填写公开的加速仓库地址" in clone_command
+    assert "ghfast.top" in clone_command or "_try_sources" in clone_command
+    # github 直连地址应预置加速后备
+    assert "ghfast.top" in clone_command
+    assert "自动多源回退" in clone_command
 
 
 def test_remote_runner_discovers_and_installs_missing_import_dependencies():
@@ -198,8 +232,21 @@ def test_remote_runner_discovers_and_installs_missing_import_dependencies():
         if step["id"] == "dependencies"
     )
     assert "AUTO_DISCOVERED_PACKAGES" in dependency_command
-    assert "opencv-python" in dependency_command
-    assert "python -m pip check" in dependency_command
+    assert "基础运行 import" in dependency_command
+    # 兼容单/双引号包裹的 base64（落盘执行使用单引号，旧内联方式使用双引号）
+    encoded = re.search(r"base64\.b64decode\(['\"]([^'\"]+)['\"]\)", dependency_command).group(1)
+    assert "'flask': 'flask'" in base64.b64decode(encoded).decode("utf-8")
+    assert '"$PYTHON_BIN" -m pip check' in dependency_command
+    assert "继续执行代码验证" in dependency_command
+    assert "here-document" not in dependency_command
+    # 落盘执行方式：先写 .dep_scan.py，再执行脚本文件（不再使用内联 exec）
+    assert '"$PYTHON_BIN" -c "from pathlib import Path' in dependency_command
+    assert "Path('.dep_scan.py').write_text" in dependency_command
+    assert 'PYTHON_BIN="$PWD/.venv/bin/python"' in dependency_command
+    assert '[ -x "$PYTHON_BIN" ] || PYTHON_BIN="$SYSTEM_PYTHON"; ' in dependency_command
+    assert "SYSTEM_PYTHON=$(command -v python3 || command -v python || true)" in dependency_command
+    assert "else if [ -f .venv/bin/activate ]" not in dependency_command
+    assert "[ -f .venv/bin/activate ] && . .venv/bin/activate" in dependency_command
 
 
 def test_remote_runner_switches_pip_mirror_after_slow_install():
@@ -214,9 +261,20 @@ def test_remote_runner_switches_pip_mirror_after_slow_install():
         if step["id"] == "install"
     )
     assert "pip_install_with_fallback" in install_command
+    assert "PIP_CACHE_DIR" in install_command
+    assert "--cache-dir" in install_command
     assert "当前依赖源安装失败或超时，自动切换下一个备用源重试" in install_command
     assert "pypi.tuna.tsinghua.edu.cn" in install_command
     assert "mirrors.aliyun.com" in install_command
+    assert "&& pip_install_with_fallback()" not in install_command
+    assert "SYSTEM_PYTHON=python3" in install_command
+    assert 'PYTHON_BIN="$PWD/.venv/bin/python"' in install_command
+    verify_command = next(
+        step["command"] for step in runner.build_pipeline()
+        if step["id"] == "verify"
+    )
+    assert "import pytest" in verify_command
+    assert "pytest" in verify_command
 
 
 def test_remote_runner_recovers_from_missing_conda_path_and_scans_datasets():
@@ -225,13 +283,152 @@ def test_remote_runner_recovers_from_missing_conda_path_and_scans_datasets():
         "user": "root",
         "repo_url": "https://github.com/example/repro-project",
         "remote_workdir": "/root/autodl-tmp/paper-repro",
+        "auto_run": True,
     })
     steps = {step["id"]: step["command"] for step in runner.build_pipeline()}
     assert "/root/miniconda3/bin/conda" in steps["env"]
     assert 'export PATH="$(dirname "$CONDA_BIN"):$PATH"' in steps["env"]
     assert "自动回退到 Python venv" in steps["env"]
-    assert "扫描数据集配置文件" in steps["dataset"]
-    assert "未经授权或错误的数据集" in steps["dataset"]
+    assert "自动发现仓库数据集配置" in steps["dataset"]
+    assert "PAPER_REPRO_DATASET_JSON" in base64.b64decode(
+        re.search(r"base64\.b64decode\(['\"]([^'\"]+)['\"]\)", steps["dataset"]).group(1)
+    ).decode("utf-8")
+    assert 'eval "$("$CONDA_BIN" shell.bash hook 2>/dev/null || true)"' in steps["verify"]
+    assert "PAPER_REPRO_AUTO_RUN_COMMAND" in steps["run"]
+    assert "未能自动推断训练命令" in steps["run"]
+
+
+def test_remote_runner_accepts_explicit_model_run_command():
+    runner = RemoteRunner({
+        "host": "example.com",
+        "user": "root",
+        "repo_url": "https://github.com/example/repro-project",
+        "remote_workdir": "/workspace/demo",
+        "run_command": "python train.py --epochs 1",
+    })
+    run_command = next(step["command"] for step in runner.build_pipeline() if step["id"] == "run")
+    assert "准备执行模型运行阶段" in run_command
+    assert "python train.py --epochs 1" in run_command
+
+
+def test_remote_runner_bounds_actual_model_command_and_collects_results():
+    runner = RemoteRunner({
+        "host": "example.com",
+        "user": "root",
+        "repo_url": "https://github.com/example/repro-project",
+        "remote_workdir": "/workspace/demo",
+        "run_command": "python train.py --epochs 1",
+        "command_timeout": 3600,
+    })
+    steps = {step["id"]: step["command"] for step in runner.build_pipeline()}
+    assert "timeout 3600 bash -c" in steps["run"]
+    encoded = re.search(r"base64\.b64decode\(['\"]([^'\"]+)['\"]\)", steps["collect"]).group(1)
+    assert "PAPER_REPRO_RESULTS_JSON" in base64.b64decode(encoded).decode("utf-8")
+    assert "训练数据配置不存在" not in steps["run"]
+
+
+def test_remote_runner_checks_configured_training_dataset_before_running():
+    runner = RemoteRunner({
+        "host": "example.com",
+        "user": "root",
+        "repo_url": "https://github.com/example/repro-project",
+        "remote_workdir": "/workspace/demo",
+        "run_command": "python train.py --epochs 1",
+        "data_config": "data/NEU-DET.yaml",
+    })
+    run_command = next(step["command"] for step in runner.build_pipeline() if step["id"] == "run")
+    assert ".paper_repro_dataset.env" in run_command
+
+
+def test_remote_runner_downloads_missing_dataset_from_trusted_yaml_instruction():
+    runner = RemoteRunner({
+        "host": "example.com",
+        "user": "root",
+        "repo_url": "https://github.com/example/repro-project",
+        "remote_workdir": "/workspace/demo",
+        "data_config": "data/coco128.yaml",
+        "auto_download_dataset": True,
+        "auto_run": True,
+    })
+    dataset_command = next(step["command"] for step in runner.build_pipeline() if step["id"] == "dataset")
+    encoded = re.search(r"base64\.b64decode\(['\"]([^'\"]+)['\"]\)", dataset_command).group(1)
+    script = base64.b64decode(encoded).decode("utf-8")
+    assert "数据集缺失，执行仓库 YAML 声明的官方下载来源" in script
+    assert "已识别数据集 YAML，但数据集缺失且仓库未声明官方下载指令" in script
+    assert "shutil.copyfileobj" in script  # 手动分块下载（支持 308 跟随与重试）
+    assert "zipfile.is_zipfile" in script
+    assert "下载后未找到 YAML 声明的 train/val 路径" in script
+    assert "data/coco128.yaml" in dataset_command
+
+
+def test_dataset_discovery_is_self_contained_and_exposes_training_config():
+    script = DatasetDiscovery.build_remote_script()
+    assert "root.rglob('*')" in script
+    assert "仓库 README 中发现候选链接" in script
+    assert "PAPER_REPRO_DATA_CONFIG" in script
+    assert "PAPER_REPRO_DATASET_JSON" in script
+
+
+def test_dataset_download_helper_injects_context_fallback():
+    """仓库下载脚本若引用上下文变量 yaml（如 yaml['path']），须注入兜底：
+    独立执行时从声明下载指令的 YAML 配置加载为字典，避免 NameError。"""
+    script = DatasetDiscovery.build_remote_script()
+    assert "PAPER_REPRO_HELPER_CONFIG" in script
+    assert "yaml = _yaml_lib.safe_load(_raw) or {}" in script or "if _raw: yaml" in script
+    assert "temp_py.write_text(prelude + download" in script
+
+    payload = {"config_path": "data/custom.yaml", "downloaded": True}
+    encoded = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+    assert DatasetDiscovery.extract_payload(f"{DatasetDiscovery.result_marker}{encoded}") == payload
+
+
+def test_remote_runner_uses_discovered_dataset_environment_file():
+    runner = RemoteRunner({
+        "host": "example.com",
+        "user": "root",
+        "repo_url": "https://github.com/example/repro-project",
+        "remote_workdir": "/workspace/demo",
+        "run_command": 'python train.py --data "${PAPER_REPRO_DATA_CONFIG}"',
+        "auto_download_dataset": True,
+    })
+    steps = {step["id"]: step["command"] for step in runner.build_pipeline()}
+    assert "自动发现仓库数据集配置" in steps["dataset"]
+    assert ".paper_repro_dataset.env" in steps["run"]
+
+
+def test_remote_runner_auto_run_discovers_standard_training_command():
+    runner = RemoteRunner({
+        "host": "example.com",
+        "user": "root",
+        "repo_url": "https://github.com/example/repro-project",
+        "remote_workdir": "/workspace/demo",
+        "auto_run": True,
+    })
+    steps = {step["id"]: step["command"] for step in runner.build_pipeline()}
+    assert ModelDiscovery.env_file_name in steps["run"]
+    assert "PAPER_REPRO_AUTO_RUN_COMMAND" in steps["run"]
+    assert "自动发现仓库数据集配置" in steps["dataset"]
+
+
+def test_remote_runner_decodes_collected_metrics():
+    payload = {"metrics": {"metrics/mAP50(B)": 0.81}, "metric_sources": ["runs/train/results.csv"], "artifacts": ["runs/train/weights/best.pt"]}
+    encoded = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+    extracted = RemoteRunner.extract_collection_payload(f"output\nPAPER_REPRO_RESULTS_JSON={encoded}\n")
+    assert extracted == payload
+
+
+def test_task_store_persists_model_execution_settings(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    task = store.create_task(
+        paper_url="https://arxiv.org/abs/2407.02988",
+        repo_url="https://github.com/example/repro-project",
+        host="example.com",
+        user="root",
+        run_command="python train.py --epochs 1",
+        command_timeout=3600,
+    )
+    assert task["run_command"] == "python train.py --epochs 1"
+    assert task["command_timeout"] == 3600
 
 
 def test_remote_runner_uses_autodl_data_disk_for_root():
@@ -359,7 +556,8 @@ def test_auto_repo_dataset_crawler():
     assert res["best_candidate"] is not None
     assert "Yolov5m-NEU-DET" in res["best_candidate"]["repo_url"]
     assert "dataset_info" in res
-    assert "NEU-DET" in res["dataset_info"]["name"]
+    assert res["dataset_info"]["detected"] is False
+    assert res["dataset_info"]["mirror_download_url"] == ""
 
 
 
@@ -388,8 +586,8 @@ def test_logging_config_and_log_analyzer(tmp_path):
 def test_detect_remote_workdir_isolates_different_papers():
     dir_paper1 = detect_remote_workdir("https://github.com/hyphen168/Yolov5m-NEU-DET", user="root")
     dir_paper2 = detect_remote_workdir("https://github.com/foo/resnet50-cifar", user="root")
-    assert dir_paper1 == "/root/autodl-tmp/Yolov5m-NEU-DET"
-    assert dir_paper2 == "/root/autodl-tmp/resnet50-cifar"
+    assert dir_paper1.startswith("/root/autodl-tmp/Yolov5m-NEU-DET__")
+    assert dir_paper2.startswith("/root/autodl-tmp/resnet50-cifar__")
     assert dir_paper1 != dir_paper2
 
 
@@ -406,3 +604,17 @@ def test_remote_runner_resets_workspace_for_same_paper():
     assert "rm -rf repo" in clone_cmd
 
 
+def test_auto_run_command_not_quoted_as_single_word():
+    """auto 模式自动命令不得被外层双引号包成单个词（P1-2 回归）。"""
+    runner = RemoteRunner({
+        "host": "example.com",
+        "user": "ubuntu",
+        "repo_url": "https://github.com/example/repro-project",
+        "remote_workdir": "/workspace/demo",
+        "auto_run": True,
+        "run_command": "",
+    })
+    run_cmd = next(step["command"] for step in runner.build_pipeline() if step["id"] == "run")
+    # 变量以裸文本出现在命令中交由 bash -c 展开分词（修复前为整词双引号形式）
+    assert '${PAPER_REPRO_AUTO_RUN_COMMAND}' in run_cmd
+    assert '"${PAPER_REPRO_AUTO_RUN_COMMAND}"' not in run_cmd.replace(chr(92), '')

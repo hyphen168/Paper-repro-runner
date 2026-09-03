@@ -5,12 +5,14 @@ from typing import Any, Dict
 
 import yaml
 
+from paper_repro_app.paths import DB_PATH, DEFAULT_DATA_DIR
+
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "db_path": str(Path(__file__).resolve().parents[1] / "data" / "tasks.db"),
+    "db_path": str(DB_PATH),
     "app_title": "Paper Repro Runner",
     "default_remote_workdir": "/workspace/paper-repro",
-    "default_data_dir": "~/data",
+    "default_data_dir": str(DEFAULT_DATA_DIR),
 }
 
 

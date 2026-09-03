@@ -1,15 +1,50 @@
+"""一键启动引导：负责把"拷贝过来的代码文件夹"变成"可运行的应用"。
+
+启动流程（全部自动）：
+1. 校验本机 Python 版本（>= 3.11，附安装指引）
+2. 校验虚拟环境健康（拷贝过来的坏 .venv 自动重建）
+3. 依赖指纹比对（requirements.txt 没变就跳过安装，秒开）
+4. 安装依赖（PyPI 失败自动切换清华/阿里镜像重试）
+5. 启动 Streamlit 并打开浏览器
+
+设计目标：朋友拿到 zip 解压后双击 start_app.bat 即可使用。
+"""
 from __future__ import annotations
 
+import hashlib
+import shutil
 import socket
 import subprocess
 import sys
+import time
 import webbrowser
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
 VENV_DIR = APP_DIR / ".venv"
-PYTHON_EXE = APP_DIR / r".venv\Scripts\python.exe"
+PYTHON_EXE = VENV_DIR / "Scripts" / "python.exe"
+REQUIREMENTS_FILE = APP_DIR / "requirements.txt"
+FINGERPRINT_FILE = VENV_DIR / ".requirements.sha256"
 DEFAULT_PORT = 8505
+MIN_PYTHON = (3, 11)
+
+# 国内镜像候选（自动测速择优，无需用户配置）
+PIP_INDEX_FALLBACKS = [
+    "https://pypi.tuna.tsinghua.edu.cn/simple",
+    "https://mirrors.aliyun.com/pypi/simple",
+    "https://mirrors.cloud.tencent.com/pypi/simple",
+    "https://pypi.doubanio.com/simple",
+    "https://mirrors.ustc.edu.cn/pypi/simple",
+    "https://repo.huaweicloud.com/repository/pypi/simple",
+]
+
+PYPI_OFFICIAL = "https://pypi.org/simple"
+
+PYTHON_DOWNLOAD_URL = "https://www.python.org/downloads/"
+
+
+def _log(message: str) -> None:
+    print(f"[Paper Repro] {message}", flush=True)
 
 
 def find_free_port(start_port: int = DEFAULT_PORT, max_tries: int = 20) -> int:
@@ -22,10 +57,6 @@ def find_free_port(start_port: int = DEFAULT_PORT, max_tries: int = 20) -> int:
         except OSError:
             continue
     return start_port
-
-
-PORT = find_free_port()
-LOCAL_URL = f"http://127.0.0.1:{PORT}"
 
 
 def get_local_ips() -> list[str]:
@@ -50,49 +81,214 @@ def is_port_in_use(port: int) -> bool:
         return sock.connect_ex(("127.0.0.1", port)) == 0
 
 
+# ---------------------------------------------------------------------------
+# 引导逻辑
+# ---------------------------------------------------------------------------
+
+def check_system_python() -> None:
+    """检查当前解释器版本；过低时给出明确的安装指引。"""
+    if sys.version_info < MIN_PYTHON:
+        _log("=" * 60)
+        _log(f"检测到 Python {sys.version_info.major}.{sys.version_info.minor}，")
+        _log("本应用需要 Python 3.11 或更高版本（建议 3.12）。")
+        _log("请到官网下载安装（安装时勾选 Add python.exe to PATH）：")
+        _log(f"  {PYTHON_DOWNLOAD_URL}")
+        _log("安装完成后重新双击 start_app.bat 即可。")
+        _log("=" * 60)
+        try:
+            webbrowser.open(PYTHON_DOWNLOAD_URL)
+        except Exception:
+            pass
+        raise SystemExit(1)
+
+
+def venv_is_healthy() -> bool:
+    """校验虚拟环境是否可用。
+
+    venv 记录创建机器的 Python 绝对路径（pyvenv.cfg 的 home 字段），
+    整个文件夹拷贝到别的电脑后该路径通常失效，必须重建。
+    """
+    if not PYTHON_EXE.exists():
+        return False
+
+    cfg_file = VENV_DIR / "pyvenv.cfg"
+    if cfg_file.exists():
+        home = ""
+        for line in cfg_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.strip().lower().startswith("home"):
+                home = line.split("=", 1)[-1].strip()
+                break
+        if home and not (Path(home) / "python.exe").exists():
+            return False
+
+    try:
+        result = subprocess.run(
+            [str(PYTHON_EXE), "-c", "import sys, venv"],
+            capture_output=True,
+            timeout=30,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def ensure_virtualenv() -> None:
-    if not VENV_DIR.exists():
-        print("[Paper Repro] Creating virtual environment...")
-        subprocess.run([sys.executable, "-m", "venv", str(VENV_DIR)], cwd=str(APP_DIR), check=True)
+    if not venv_is_healthy():
+        if VENV_DIR.exists():
+            _log("检测到损坏的虚拟环境（可能来自其他电脑），自动重建...")
+            shutil.rmtree(VENV_DIR, ignore_errors=True)
+        _log("正在创建虚拟环境（仅首次需要，约 10 秒）...")
+        subprocess.run(
+            [sys.executable, "-m", "venv", str(VENV_DIR)],
+            cwd=str(APP_DIR),
+            check=True,
+        )
+
+
+def requirements_fingerprint() -> str:
+    if not REQUIREMENTS_FILE.exists():
+        return "no-requirements"
+    return hashlib.sha256(REQUIREMENTS_FILE.read_bytes()).hexdigest()
+
+
+def dependencies_current() -> bool:
+    """requirements.txt 与上次安装时一致则跳过安装。"""
+    if not FINGERPRINT_FILE.exists():
+        return False
+    try:
+        return FINGERPRINT_FILE.read_text(encoding="utf-8").strip() == requirements_fingerprint()
+    except OSError:
+        return False
+
+
+def run_pip_install(index_url: str | None) -> int:
+    command = [
+        str(PYTHON_EXE),
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "-r",
+        str(REQUIREMENTS_FILE),
+    ]
+    if index_url:
+        command += ["-i", index_url]
+    result = subprocess.run(command, cwd=str(APP_DIR), check=False)
+    return result.returncode
+
+
+def _probe_index(url: str, timeout: float = 4.0) -> float | None:
+    """探测镜像源连通性，返回响应耗时（秒）；不可用返回 None。"""
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "paper-repro-boot/1.0"})
+        start = time.monotonic()
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status < 400:
+                return time.monotonic() - start
+    except Exception:
+        pass
+    # 部分源不支持 HEAD，退化为 GET 首字节
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "paper-repro-boot/1.0"})
+        start = time.monotonic()
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read(1)
+            if resp.status < 400:
+                return time.monotonic() - start
+    except Exception:
+        pass
+    return None
+
+
+def pick_best_index() -> str | None:
+    """并发探测候选镜像，返回响应最快的可用源（含官方 PyPI）；全部不可用返回 None。"""
+    import concurrent.futures
+
+    candidates = [PYPI_OFFICIAL] + PIP_INDEX_FALLBACKS
+    results: dict[str, float | None] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(candidates))) as pool:
+        futures = {pool.submit(_probe_index, url): url for url in candidates}
+        for fut in concurrent.futures.as_completed(futures, timeout=12):
+            url = futures[fut]
+            try:
+                results[url] = fut.result()
+            except Exception:
+                results[url] = None
+    alive = [(t, url) for url, t in results.items() if t is not None]
+    if not alive:
+        return None
+    alive.sort()
+    return alive[0][1]
 
 
 def ensure_dependencies() -> None:
     if not PYTHON_EXE.exists():
-        raise FileNotFoundError(f"Virtual environment Python not found: {PYTHON_EXE}")
+        raise FileNotFoundError(f"虚拟环境 Python 不存在: {PYTHON_EXE}")
 
-    print("[Paper Repro] Installing dependencies...")
-    result = subprocess.run(
-        [str(PYTHON_EXE), "-m", "pip", "install", "-r", "requirements.txt", "--disable-pip-version-check"],
-        cwd=str(APP_DIR),
-        check=False,
-    )
-    if result.returncode != 0:
-        print("[Paper Repro] Dependency install failed. Close any running Python/Streamlit process and try again.")
-        raise SystemExit(result.returncode)
+    if dependencies_current():
+        _log("依赖已就绪，跳过安装（秒开）。")
+        return
+
+    _log("正在安装依赖（仅首次或依赖变化时，约 1-3 分钟）...")
+
+    # 自动测速择优：并发探测官方源与全部国内镜像，选响应最快的可用源
+    best = pick_best_index()
+    if best:
+        _log(f"镜像测速完成，自动选用最快可用源: {best}")
+        if run_pip_install(best) == 0:
+            FINGERPRINT_FILE.write_text(requirements_fingerprint(), encoding="utf-8")
+            _log("依赖安装完成。")
+            return
+        _log("首选源安装失败，尝试其余镜像...")
+    else:
+        _log("网络探测失败（可能离线），按顺序逐个尝试官方源与镜像...")
+
+    # 保底：按固定顺序逐个重试（含官方源兜底）
+    ordered = [PYPI_OFFICIAL] + PIP_INDEX_FALLBACKS
+    for mirror in ordered:
+        if mirror == best:
+            continue  # 已试过
+        _log(f"正在尝试: {mirror}")
+        if run_pip_install(mirror) == 0:
+            FINGERPRINT_FILE.write_text(requirements_fingerprint(), encoding="utf-8")
+            _log("依赖安装完成。")
+            return
+
+    _log("依赖安装失败。请检查网络后重新双击 start_app.bat。")
+    _log("若持续失败，可手动执行: .venv\\Scripts\\python -m pip install -r requirements.txt")
+    raise SystemExit(1)
 
 
-def open_browser() -> None:
+# ---------------------------------------------------------------------------
+# 应用启动
+# ---------------------------------------------------------------------------
+
+def open_browser(url: str, port: int) -> None:
     try:
-        webbrowser.open(LOCAL_URL, new=2, autoraise=True)
-        print(f"[Paper Repro] Opening browser: {LOCAL_URL}")
+        webbrowser.open(url, new=2, autoraise=True)
+        _log(f"已打开浏览器: {url}")
         for ip in get_local_ips():
             if ip != "127.0.0.1":
-                print(f"[Paper Repro] Phone/LAN access URL: http://{ip}:{PORT}")
-    except Exception as exc:
-        print(f"[Paper Repro] Could not open browser automatically: {exc}")
+                _log(f"同网段手机/平板访问: http://{ip}:{port}")
+    except Exception as exc:  # pragma: no cover
+        _log(f"未能自动打开浏览器（不影响使用，手动访问 {url}）: {exc}")
 
 
 def start_app() -> None:
-    if is_port_in_use(PORT):
-        print(f"[Paper Repro] App already running at {LOCAL_URL}")
-        open_browser()
+    # 若默认端口已被占用，大概率是应用已在运行，直接打开浏览器而非再起一个实例
+    if is_port_in_use(DEFAULT_PORT):
+        url = f"http://127.0.0.1:{DEFAULT_PORT}"
+        _log(f"应用已在运行: {url}")
+        open_browser(url, DEFAULT_PORT)
         return
 
-    print(f"[Paper Repro] Starting app at {LOCAL_URL}")
-    for ip in get_local_ips():
-        if ip != "127.0.0.1":
-            print(f"[Paper Repro] LAN/mobile access: http://{ip}:{PORT}")
-    open_browser()
+    port = find_free_port()
+    url = f"http://127.0.0.1:{port}"
+
+    _log(f"应用启动中: {url}")
+    open_browser(url, port)
 
     subprocess.run(
         [
@@ -106,7 +302,7 @@ def start_app() -> None:
             "--server.address",
             "0.0.0.0",
             "--server.port",
-            str(PORT),
+            str(port),
         ],
         cwd=str(APP_DIR),
         check=False,
@@ -114,6 +310,7 @@ def start_app() -> None:
 
 
 if __name__ == "__main__":
+    check_system_python()
     ensure_virtualenv()
     ensure_dependencies()
     start_app()

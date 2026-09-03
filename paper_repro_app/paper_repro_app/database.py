@@ -43,7 +43,7 @@ class SQLiteOpenHelper:
 
 class TaskStore(SQLiteOpenHelper):
     def __init__(self, db_path: str | Path):
-        super().__init__(db_path, version=2)
+        super().__init__(db_path, version=8)
 
     def _connect(self) -> sqlite3.Connection:
         return self.get_connection()
@@ -63,6 +63,14 @@ class TaskStore(SQLiteOpenHelper):
                 remote_workdir TEXT,
                 local_data_dir TEXT,
                 environment_mode TEXT DEFAULT 'conda',
+                run_command TEXT DEFAULT '',
+                command_timeout INTEGER DEFAULT 900,
+                data_config TEXT DEFAULT '',
+                model_weights TEXT DEFAULT '',
+                auto_download_dataset INTEGER DEFAULT 1,
+                auto_run INTEGER DEFAULT 0,
+                tune_args TEXT DEFAULT '',
+                data_split TEXT DEFAULT '',
                 status TEXT DEFAULT 'queued',
                 current_step TEXT DEFAULT 'queued',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -78,7 +86,19 @@ class TaskStore(SQLiteOpenHelper):
             row["name"]
             for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
         }
-        for col, col_type in [("port", "TEXT"), ("clone_url", "TEXT"), ("current_step", "TEXT DEFAULT 'queued'")]:
+        for col, col_type in [
+            ("port", "TEXT"),
+            ("clone_url", "TEXT"),
+            ("current_step", "TEXT DEFAULT 'queued'"),
+            ("run_command", "TEXT DEFAULT ''"),
+            ("command_timeout", "INTEGER DEFAULT 900"),
+            ("data_config", "TEXT DEFAULT ''"),
+            ("model_weights", "TEXT DEFAULT ''"),
+            ("auto_download_dataset", "INTEGER DEFAULT 1"),
+            ("auto_run", "INTEGER DEFAULT 0"),
+            ("tune_args", "TEXT DEFAULT ''"),
+            ("data_split", "TEXT DEFAULT ''"),
+        ]:
             if col not in columns:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {col_type}")
 
@@ -93,8 +113,9 @@ class TaskStore(SQLiteOpenHelper):
                 """
                 INSERT INTO tasks (
                     id, paper_url, repo_url, clone_url, host, user, ssh_key_path, port, remote_workdir,
-                    local_data_dir, environment_mode, status, current_step, log
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    local_data_dir, environment_mode, run_command, command_timeout, data_config, model_weights,
+                    auto_download_dataset, auto_run, tune_args, data_split, status, current_step, log
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -108,6 +129,14 @@ class TaskStore(SQLiteOpenHelper):
                     kwargs.get("remote_workdir"),
                     kwargs.get("local_data_dir"),
                     kwargs.get("environment_mode", "conda"),
+                    kwargs.get("run_command", ""),
+                    kwargs.get("command_timeout", 900),
+                    kwargs.get("data_config", ""),
+                    kwargs.get("model_weights", ""),
+                    int(bool(kwargs.get("auto_download_dataset", True))),
+                    int(bool(kwargs.get("auto_run", False))),
+                    kwargs.get("tune_args", ""),
+                    kwargs.get("data_split", ""),
                     status,
                     current_step,
                     log,

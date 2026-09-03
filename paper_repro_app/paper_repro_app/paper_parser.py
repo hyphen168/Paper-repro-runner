@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from typing import Dict, Optional
-from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup

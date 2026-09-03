@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-DEFAULT_LOG_DIR = Path(__file__).resolve().parents[1] / "logs"
-DEFAULT_LOG_FILE = DEFAULT_LOG_DIR / "app.log"
+from paper_repro_app.paths import LOG_DIR, LOG_FILE
+
+DEFAULT_LOG_DIR = LOG_DIR
+DEFAULT_LOG_FILE = LOG_FILE
 
 
 def setup_logger(

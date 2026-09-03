@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import json
 import re
 import urllib.parse
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 import requests
 from bs4 import BeautifulSoup
 
@@ -139,7 +138,7 @@ class AutoRepoDatasetCrawler:
 
         # 2. Extract title & keywords
         keywords = self.extract_keywords_from_paper(paper_url)
-        search_query = keywords[0] if keywords else "NEU-DET defect detection"
+        search_query = keywords[0] if keywords else ""
 
         # 3. Crawl GitHub and Gitee
         gh_results = self.search_github_candidates(search_query, limit=5)
@@ -156,14 +155,11 @@ class AutoRepoDatasetCrawler:
 
         best_candidate = all_candidates[0] if all_candidates else None
 
-        # 5. Dataset candidates (e.g. NEU-DET, VOC, COCO, etc.)
-        combined_text = (search_query + " " + user_repo_hint + " " + paper_url).lower()
-        is_neu = "neu" in combined_text or "defect" in combined_text or "yolo" in combined_text
         dataset_info = {
-            "name": "NEU-DET 钢材表面缺陷数据集" if is_neu else "通用计算机视觉数据集",
-            "detected": True,
-            "mirror_download_url": "https://aistudio.baidu.com/datasetdetail/102047",
-            "instructions": "已自动匹配 NEU-DET 数据集结构 (包含 6 类缺陷: rolled-in_scale, patches, pitted_surface, inclusion, scratches, scratches).",
+            "name": "待从目标仓库配置中识别",
+            "detected": False,
+            "mirror_download_url": "",
+            "instructions": "云端会扫描目标仓库的数据集配置；只有 YAML 声明官方下载地址时才会自动下载并校验。",
         }
 
         return {

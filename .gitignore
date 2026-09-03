@@ -22,3 +22,5 @@ dist/
 *.egg-info/
 .env
 .env.*
+paper_repro_app/data/tasks.db
+paper_repro_app/data/tasks.db-*
