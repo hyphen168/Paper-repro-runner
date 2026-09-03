@@ -23,13 +23,18 @@ from paper_repro_app.database import TaskStore
 from paper_repro_app.diagnostics import EnvironmentDiagnostics
 from paper_repro_app.comparison_table import generate_experiment_table
 from paper_repro_app.innovation_analysis import PaperInnovationAnalyzer
+from paper_repro_app.log_analyzer import LogAnalyzer
+from paper_repro_app.logging_config import get_logger, DEFAULT_LOG_FILE
 from paper_repro_app.paper_parser import extract_repo_url
 from paper_repro_app.project_summary import generate_project_summary
 from paper_repro_app.remote_runner import RemoteRunner
+from paper_repro_app.repo_crawler import AutoRepoDatasetCrawler
 from paper_repro_app.report_generator import generate_repro_report
 
+logger = get_logger("paper_repro_app")
 
-DATA_DB_PATH = Path("paper_repro_app/data/tasks.db")
+
+DATA_DB_PATH = Path(__file__).resolve().parent / "data" / "tasks.db"
 
 
 def format_log_preview(raw_log: str | None, max_entries: int = 3) -> str:
@@ -97,6 +102,16 @@ def parse_ssh_target(raw_target: str) -> dict[str, str]:
         candidate["host"] = ""
 
     return {key: value for key, value in candidate.items() if value}
+
+
+def resolve_repo_url(repo_hint: str, detected_repo: str | None) -> str:
+    explicit_repo = (repo_hint or "").strip()
+    if explicit_repo:
+        return explicit_repo
+    detected = (detected_repo or "").strip()
+    if detected.rstrip("/") == "https://huggingface.co/huggingface":
+        return ""
+    return detected
 
 
 def get_ssh_config_path() -> Path:
@@ -177,20 +192,118 @@ def resolve_ssh_profile(raw_target: str = "", fallback_host: str = "", fallback_
     }
 
 
+def ensure_ssh_key_file(key_value: str | os.PathLike[str] | None) -> str:
+    if key_value is None:
+        return ""
+    value = str(key_value).strip()
+    if not value:
+        return ""
+    if value.startswith("-----BEGIN") or "PRIVATE KEY" in value.upper():
+        ssh_dir = Path.home() / ".ssh" / "paper_repro_generated"
+        ssh_dir.mkdir(parents=True, exist_ok=True)
+        key_file = ssh_dir / f"paper_repro_{abs(hash(value))}.key"
+        if not key_file.exists() or key_file.read_text(encoding="utf-8", errors="replace") != value:
+            key_file.write_text(value, encoding="utf-8")
+        key_file.chmod(0o600)
+        return str(key_file)
+    expanded = os.path.expanduser(value)
+    if os.path.isfile(expanded):
+        return expanded
+    return ""
+
+
+def ensure_default_ssh_keypair() -> tuple[str, str]:
+    ssh_dir = Path.home() / ".ssh"
+    key_path = ssh_dir / "id_ed25519"
+    public_key_path = ssh_dir / "id_ed25519.pub"
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+
+    if not key_path.exists():
+        result = subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-f", str(key_path), "-N", "", "-q"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "ssh-keygen 执行失败。").strip()
+            raise RuntimeError(f"无法自动生成 SSH 私钥：{message}")
+
+    if not public_key_path.exists():
+        result = subprocess.run(
+            ["ssh-keygen", "-y", "-f", str(key_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            message = (result.stderr or result.stdout or "无法导出公钥。").strip()
+            raise RuntimeError(f"无法生成 SSH 公钥：{message}")
+        public_key_path.write_text(result.stdout.strip() + "\n", encoding="utf-8")
+
+    return str(key_path), public_key_path.read_text(encoding="utf-8").strip()
+
+
+def render_ssh_config_block(alias: str, host: str, user: str, port: str, key: str) -> str:
+    alias_name = (alias or host or "papercloud").strip()
+    host_name = (host or alias_name).strip()
+    user_name = (user or "root").strip()
+    port_value = (port or "22").strip()
+    key_value = ensure_ssh_key_file(key)
+    if not key_value:
+        key_value = "~/.ssh/id_ed25519"
+    return (
+        f"Host {alias_name}\n"
+        f"  HostName {host_name}\n"
+        f"  User {user_name}\n"
+        f"  Port {port_value}\n"
+        f"  IdentityFile {os.path.expanduser(key_value)}\n"
+        f"  IdentitiesOnly yes\n"
+        f"  ServerAliveInterval 30\n"
+    )
+
+
+def write_ssh_profile(alias: str, host: str, user: str, port: str, key: str, config_path: str | os.PathLike[str] | None = None, force: bool = False) -> Path:
+    ssh_config = Path(config_path) if config_path else Path.home() / ".ssh" / "config"
+    ssh_config.parent.mkdir(parents=True, exist_ok=True)
+    block = render_ssh_config_block(alias, host, user, port, key)
+    if not ssh_config.exists():
+        ssh_config.write_text(block, encoding="utf-8")
+        ssh_config.chmod(0o600)
+        return ssh_config
+
+    existing = ssh_config.read_text(encoding="utf-8", errors="replace")
+    host_pattern = rf"(?ms)^Host\s+{re.escape(alias or host or 'papercloud')}\s*$.*?(?=^Host\s|\Z)"
+    match = re.search(host_pattern, existing)
+    if match and not force:
+        replacement = block.rstrip() + "\n"
+        updated = existing[: match.start()] + replacement + existing[match.end():]
+        ssh_config.write_text(updated, encoding="utf-8")
+        ssh_config.chmod(0o600)
+        return ssh_config
+
+    appended = existing.rstrip() + "\n\n" + block
+    ssh_config.write_text(appended, encoding="utf-8")
+    ssh_config.chmod(0o600)
+    return ssh_config
+
+
 def detect_remote_workdir(repo_hint: str, user: str = "", host: str = "") -> str:
-    repo_name = (repo_hint or "paper-repro").strip().rstrip("/")
-    repo_name = repo_name.split("/")[-1].replace(".git", "") or "paper-repro"
-    candidate_paths = [
-        f"/home/{user}/paper-repro" if user else "/home/ubuntu/paper-repro",
-        f"/workspace/{repo_name}",
-        f"/workspace/{user}/{repo_name}" if user else "/workspace/paper-repro",
-        f"/opt/{repo_name}",
-        f"/home/{user}/{repo_name}" if user else "/home/ubuntu/paper-repro",
-    ]
-    for path in candidate_paths:
-        if path not in {"", None}:
-            return path
-    return "/workspace/paper-repro"
+    raw = (repo_hint or "").strip().rstrip("/")
+    if raw and "/" in raw:
+        repo_name = raw.split("/")[-1].replace(".git", "").strip()
+    else:
+        repo_name = raw or "paper-repro"
+
+    if not repo_name or repo_name.lower() in {"http:", "https:", "github.com", "gitee.com", "paper-repro"}:
+        repo_name = "paper-repro"
+
+    if user == "root":
+        return f"/root/autodl-tmp/{repo_name}"
+    elif user:
+        return f"/home/{user}/{repo_name}"
+    else:
+        return f"/workspace/{repo_name}"
 
 
 def open_directory_dialog(default_path: str) -> str:
@@ -205,8 +318,81 @@ def open_directory_dialog(default_path: str) -> str:
     return selected or base_dir
 
 
+def test_ssh_connection(
+    host: str,
+    user: str,
+    port: str,
+    key: str,
+    password: str = "",
+    alias: str | None = None,
+    timeout: int = 12,
+) -> tuple[bool, str]:
+    host_value = (host or "").strip()
+    user_value = (user or "").strip()
+    port_value = (port or "22").strip()
+    key_value = ensure_ssh_key_file(key)
+    if not host_value or not user_value:
+        return False, "请先填写云服务器地址和用户名。"
+    if password:
+        try:
+            import paramiko
+        except ImportError:
+            return False, "无法测试密码登录：缺少 paramiko 依赖。"
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(
+                hostname=host_value,
+                username=user_value,
+                port=int(port_value) if port_value.isdigit() else 22,
+                password=password,
+                key_filename=key_value or None,
+                timeout=timeout,
+                allow_agent=True,
+                look_for_keys=True,
+            )
+            ssh.close()
+            return True, "SSH 密码认证测试成功，软件可以使用该密码连接云服务器。"
+        except Exception as exc:
+            return False, f"SSH 密码认证失败：{exc}"
+
+    if not key_value:
+        return False, "未找到有效的 SSH 私钥文件。请使用应用自动生成的私钥，或填写真实私钥路径。"
+
+    if alias and alias.strip():
+        ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new", "-T", alias]
+    else:
+        args = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new", "-T"]
+        if port_value and port_value != "22":
+            args.extend(["-p", port_value])
+        if key_value:
+            args.extend(["-i", key_value])
+        args.extend([f"{user_value}@{host_value}"])
+        ssh_cmd = args
+
+    try:
+        result = subprocess.run(
+            ssh_cmd + ["echo", "SSH_OK"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return False, f"SSH 测试执行失败：{exc}"
+
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    if result.returncode == 0 and "SSH_OK" in stdout:
+        return True, "SSH 连接测试成功，当前环境已经可访问云服务器。"
+    reason = stderr or stdout or "SSH 认证失败或目标主机不可达。"
+    if "Permission denied" in reason or "no such identity" in reason.lower():
+        reason = "SSH 认证失败：远程服务器没有接受当前私钥，或者本地提供的不是有效私钥文件。请先生成真实私钥并把对应公钥放到 /root/.ssh/authorized_keys。"
+    return False, reason
+
+
 def get_step_order() -> list[str]:
-    return ["prepare", "clone", "env", "install", "verify", "collect"]
+    return ["prepare", "clone", "env", "install", "dependencies", "dataset", "verify", "collect"]
 
 
 def estimate_completion(task: dict | None) -> str:
@@ -219,7 +405,7 @@ def estimate_completion(task: dict | None) -> str:
     order = get_step_order()
     current_step = task.get("current_step") or "prepare"
     idx = order.index(current_step) if current_step in order else 0
-    remaining_minutes = [2, 3, 4, 5, 4, 2][idx:]
+    remaining_minutes = [2, 3, 4, 5, 3, 4, 4, 2][idx:]
     remaining = sum(remaining_minutes) if remaining_minutes else 3
     if task.get("status") == "running":
         eta = datetime.now() + timedelta(minutes=remaining)
@@ -270,6 +456,8 @@ def render_repro_progress(task: dict | None) -> None:
         "clone": "拉取代码",
         "env": "环境诊断",
         "install": "安装依赖",
+        "dependencies": "补装缺失依赖",
+        "dataset": "识别并准备数据集",
         "verify": "执行验证",
         "collect": "收集结果",
     }.get(current, current)
@@ -1015,12 +1203,32 @@ def render_app() -> None:
         unsafe_allow_html=True,
     )
 
+    try:
+        generated_ssh_key, generated_ssh_public_key = ensure_default_ssh_keypair()
+    except RuntimeError as exc:
+        generated_ssh_key, generated_ssh_public_key = "", ""
+        st.error(str(exc))
+
     with st.form("paper_form"):
         left_col, center_col, right_col = st.columns([1.8, 1.2, 0.9])
 
         with left_col:
             paper_url = st.text_input("论文链接", value=saved.get("paper_url", "https://arxiv.org/abs/2401.00001"))
             repo_hint = st.text_input("代码仓库候选（可选）", value=saved.get("repo_hint", ""))
+            saved_clone_url = saved.get("clone_url", "")
+            if "your-username" in saved_clone_url:
+                saved_clone_url = ""
+            clone_url = st.text_input(
+                "加速仓库地址（可选，填写你信任的镜像完整地址）",
+                value=saved_clone_url,
+                placeholder="留空使用官方仓库；仅填写与代码仓库完全对应的可信镜像地址",
+            )
+            st.caption("默认使用官方仓库。系统会跳过 LFS 大文件、历史提交和标签，并显示真实下载进度。")
+            pip_index_url = st.text_input(
+                "Python 依赖源（可选）",
+                value=saved.get("pip_index_url", ""),
+                placeholder="留空使用官方 PyPI；仅填写你信任的完整镜像地址",
+            )
             ssh_target = st.text_input(
                 "SSH 连接串（可选，可直接填 user@host 或 ssh user@host -i ~/.ssh/id_rsa）",
                 value=saved.get("ssh_target", ""),
@@ -1035,7 +1243,14 @@ def render_app() -> None:
 
             default_cloud_host = ssh_meta.get("host") or saved.get("cloud_host") or "my-server.example.com"
             default_cloud_user = ssh_meta.get("user") or saved.get("cloud_user") or "ubuntu"
-            default_ssh_key = ssh_meta.get("key") or saved.get("ssh_key_path") or "~/.ssh/id_rsa"
+            saved_ssh_key = saved.get("ssh_key_path", "")
+            default_ssh_key = (
+                ssh_meta.get("key")
+                or ensure_ssh_key_file(saved_ssh_key)
+                or generated_ssh_key
+                or "~/.ssh/id_ed25519"
+            )
+            default_ssh_alias = saved.get("ssh_alias", "papercloud")
 
             cloud_host = st.text_input(
                 "云服务器地址 / IP",
@@ -1045,14 +1260,62 @@ def render_app() -> None:
                 "云服务器用户名",
                 value=default_cloud_user,
             )
+            cloud_password = st.text_input(
+                "云服务器密码（仅用于本机临时认证，不写入仓库）",
+                value="",
+                type="password",
+            )
             ssh_key_path = st.text_input(
-                "SSH 私钥路径",
+                "SSH 私钥路径（启动时自动生成并预填）",
                 value=default_ssh_key,
             )
+            ssh_port = st.text_input(
+                "SSH 端口",
+                value=str(ssh_meta.get("port") or saved.get("ssh_port") or "22"),
+            )
+            if generated_ssh_public_key:
+                st.caption("将下方公钥追加到云服务器的 /root/.ssh/authorized_keys 后，即可免密码登录。")
+                st.code(generated_ssh_public_key, language="text")
+            ssh_alias = st.text_input(
+                "SSH 配置别名",
+                value=default_ssh_alias,
+                placeholder="papercloud",
+            )
+            action_cols = st.columns([1, 1])
+            with action_cols[0]:
+                generate_profile_btn = st.form_submit_button("生成 SSH 配置", use_container_width=True)
+            with action_cols[1]:
+                test_connection_btn = st.form_submit_button("测试 SSH 连接", use_container_width=True)
+            if generate_profile_btn:
+                profile_path = write_ssh_profile(
+                    ssh_alias.strip() or "papercloud",
+                    cloud_host.strip() or default_cloud_host,
+                    cloud_user.strip() or default_cloud_user,
+                    ssh_port.strip() or "22",
+                    ssh_key_path.strip() or default_ssh_key,
+                )
+                st.success(f"SSH 配置已写入：{profile_path}，现在可直接执行 ssh {ssh_alias.strip() or 'papercloud'}")
+            if test_connection_btn:
+                ok, msg = test_ssh_connection(
+                    host=(cloud_host or default_cloud_host).strip(),
+                    user=(cloud_user or default_cloud_user).strip(),
+                    port=ssh_port.strip() or "22",
+                    key=ssh_key_path.strip() or default_ssh_key,
+                    password=cloud_password,
+                    alias=(ssh_alias or default_ssh_alias).strip() or "papercloud",
+                )
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+                    st.caption("建议：先确保远程服务器已把本机公钥写入 ~/.ssh/authorized_keys，并且端口与私钥路径一致。")
             auto_remote_dir = detect_remote_workdir(repo_hint or paper_url, cloud_user, cloud_host)
+            saved_remote_workdir = saved.get("remote_workdir", "")
+            if cloud_user.strip() == "root" and saved_remote_workdir == "/home/root/paper-repro":
+                saved_remote_workdir = "/root/autodl-tmp/paper-repro"
             remote_workdir = st.text_input(
                 "远程工作目录",
-                value=saved.get("remote_workdir", auto_remote_dir),
+                value=saved_remote_workdir or auto_remote_dir,
             )
             st.caption("建议：系统会优先根据 SSH 用户名和仓库名称自动推导工作目录。")
             repo_probe_dir = st.text_input("本地仓库校验目录（可选，便于提前诊断环境）", value=saved.get("repo_probe_dir", ""))
@@ -1162,15 +1425,31 @@ def render_app() -> None:
     st.markdown("---")
 
     if submitted:
+        # Automated crawler engine to evaluate and rank optimal repository and dataset
+        crawler = AutoRepoDatasetCrawler()
+        crawl_results = crawler.evaluate_and_rank_candidates(paper_url, repo_hint)
+        best_candidate = crawl_results.get("best_candidate")
+
         detected_repo = extract_repo_url(paper_url)
-        repo_url = detected_repo or repo_hint.strip() or "https://github.com/example/project"
+        repo_url = (best_candidate.get("repo_url") if best_candidate else None) or resolve_repo_url(repo_hint, detected_repo)
+        
+        # If user provided explicit clone_url or crawler found accelerated mirror
+        effective_clone_url = clone_url.strip() or (best_candidate.get("accelerated_url") if best_candidate else None) or (best_candidate.get("clone_url") if best_candidate else None) or repo_url
+
+        if not repo_url:
+            st.error(
+                "未识别到可用的论文代码仓库。请在“代码仓库候选”中填写真实 Git 仓库地址后重新提交。"
+            )
+            st.stop()
+
+        st.info(f"🕷️ 爬虫全网智选引擎完成：已为您定位最优代码仓库【{repo_url}】及匹配数据集【{crawl_results['dataset_info']['name']}】")
 
         ssh_target_value = ssh_target.strip()
         resolved_profile = resolve_ssh_profile(ssh_target_value, cloud_host.strip(), cloud_user.strip(), ssh_key_path.strip())
         resolved_cloud_host = resolved_profile.get("host") or cloud_host.strip() or "my-server.example.com"
         resolved_cloud_user = resolved_profile.get("user") or cloud_user.strip() or "ubuntu"
         resolved_ssh_key = resolved_profile.get("key") or ssh_key_path.strip() or "~/.ssh/id_rsa"
-        resolved_ssh_port = resolved_profile.get("port") or ssh_meta.get("port") or "22"
+        resolved_ssh_port = ssh_port.strip() or resolved_profile.get("port") or "22"
         resolved_remote_dir = remote_workdir.strip() or detect_remote_workdir(repo_hint or paper_url, resolved_cloud_user, resolved_cloud_host)
         resolved_local_dir = (st.session_state.get("selected_local_data_dir") or local_data_dir or str(Path.home() / "paper_repro_data")).strip()
 
@@ -1184,11 +1463,14 @@ def render_app() -> None:
             {
                 "paper_url": paper_url,
                 "repo_hint": repo_hint,
+                "clone_url": clone_url.strip(),
+                "pip_index_url": pip_index_url.strip(),
                 "ssh_target": ssh_target_value,
                 "cloud_host": resolved_cloud_host,
                 "cloud_user": resolved_cloud_user,
                 "ssh_key_path": resolved_ssh_key,
                 "ssh_port": resolved_ssh_port,
+                "ssh_alias": ssh_alias.strip() or "papercloud",
                 "remote_workdir": resolved_remote_dir,
                 "local_data_dir": resolved_local_dir,
                 "repo_probe_dir": repo_probe_dir,
@@ -1204,10 +1486,10 @@ def render_app() -> None:
         else:
             st.caption("若你本地已有代码仓库，可填入仓库目录进行预诊断；未填则在云端执行阶段自动完成环境适配。")
 
-        if not detected_repo and repo_hint.strip():
+        if repo_hint.strip():
             st.info("已使用用户提供的代码仓库候选值继续执行。")
         elif not detected_repo:
-            st.warning("未从论文页面中自动识别到代码仓库，已使用默认候选值继续执行。")
+            st.warning("未从论文页面中自动识别到代码仓库，请先填写仓库候选值。")
 
         task = store.create_task(
             paper_url=paper_url,
@@ -1216,12 +1498,15 @@ def render_app() -> None:
             user=resolved_cloud_user,
             ssh_key_path=os.path.expanduser(resolved_ssh_key),
             port=resolved_ssh_port,
+            clone_url=effective_clone_url or repo_url,
+            pip_index_url=pip_index_url.strip(),
             remote_workdir=resolved_remote_dir,
             local_data_dir=os.path.expanduser(resolved_local_dir),
             environment_mode=env_mode,
             status="queued",
             current_step="prepare",
         )
+        task["password"] = cloud_password
 
         st.session_state["task_id"] = task["id"]
         st.session_state["task_log_preview"] = "任务已创建，等待云端执行开始..."
@@ -1250,15 +1535,29 @@ def render_app() -> None:
         pipeline = runner.build_pipeline()
         st.session_state["task_log_preview"] = "正在执行论文复现流水线..."
 
-        for step in pipeline:
-            current_status = "running"
-            store.update_task_status(task["id"], current_status, f"执行 {step['title']}：{step['id']}", current_step=step["id"])
-            st.session_state["task_log_preview"] = f"[{step['id']}] {step['title']}\n" + (st.session_state.get("task_log_preview") or "")
-            render_repro_progress({"status": current_status, "current_step": step["id"]})
-
         store.update_task_status(task["id"], "running", "任务已进入云端执行阶段，准备按流水线执行复现步骤。", current_step="prepare")
+        live_log: list[str] = []
+        progress_placeholder = st.empty()
+        log_placeholder = st.empty()
+
+        def update_remote_progress(step_id: str, step_title: str, message: str) -> None:
+            timestamped = f"[{datetime.now().strftime('%H:%M:%S')}] [{step_id}] {message.strip()}"
+            live_log.append(timestamped)
+            trimmed_log = "\n".join(live_log[-30:])
+            store.update_task_status(task["id"], "running", trimmed_log, current_step=step_id)
+            st.session_state["task_log_preview"] = trimmed_log
+            progress_placeholder.empty()
+            with progress_placeholder:
+                render_repro_progress({"status": "running", "current_step": step_id})
+            log_placeholder.code(format_log_preview(trimmed_log), language="text")
+
+        update_remote_progress(
+            "prepare",
+            "准备工作目录",
+            "已开始连接云端。若代码源在 13 秒内无响应，系统会立即提示网络或仓库地址问题。",
+        )
         with st.spinner("正在按论文复现流水线执行..."):
-            result = runner.execute()
+            result = runner.execute(on_step=update_remote_progress)
 
         task = store.get_task(task["id"])
         st.session_state["task_log_preview"] = result.get("logs", "")[:4000] if isinstance(result.get("logs"), str) else json.dumps(result, ensure_ascii=False, indent=2)[:4000]
@@ -1337,8 +1636,10 @@ def render_app() -> None:
             st.session_state["task_log_preview"] = result.get("logs", "")[:4000] if isinstance(result.get("logs"), str) else json.dumps(result, ensure_ascii=False, indent=2)[:4000]
             st.rerun()
 
-    st.subheader("最近任务")
-    for task in store.list_tasks(limit=10):
+    st.subheader("最近任务与错误定位诊断")
+    log_analyzer = LogAnalyzer()
+    tasks_list = store.list_tasks(limit=10)
+    for task in tasks_list:
         with st.container():
             status_color = get_status_color(task["status"])
             task_log_preview = (task.get("log") or "")[:180]
@@ -1346,9 +1647,26 @@ def render_app() -> None:
             st.markdown(
                 f"<div style='border-left: 4px solid {status_color}; padding: 8px 12px; margin: 6px 0;'>"
                 f"<strong>{task['id']}</strong> | 状态: {task['status']} | 当前步骤: {task.get('current_step', 'queued')} | 仓库: {task['repo_url']}<br>"
-                f"预计完成时间: {eta_value} | 日志: {task_log_preview}</div>",
+                f"预计完成时间: {eta_value} | 日志摘要: {task_log_preview}</div>",
                 unsafe_allow_html=True,
             )
+            # If task failed or has error, offer quick diagnosis expander
+            if task.get("status") in {"failed", "error"} or "error" in (task.get("log") or "").lower():
+                diag = log_analyzer.analyze_log(task.get("log"))
+                with st.expander(f"🔍 任务 [{task['id']}] 错误定位与根因诊断", expanded=False):
+                    st.error(f"错误类别: {diag['error_category']} | 触发步骤: {diag['failed_step']}")
+                    st.markdown("**📍 关键报错日志片段:**")
+                    st.code(diag["error_snippet"], language="text")
+                    st.markdown(f"**💡 根因分析:** {diag['cause']}")
+                    st.markdown(f"**🔧 推荐解决方案:** {diag['suggestion']}")
+
+    with st.expander("📄 查看后台系统日志文件 (app.log)", expanded=False):
+        if DEFAULT_LOG_FILE.exists():
+            log_text = DEFAULT_LOG_FILE.read_text(encoding="utf-8", errors="replace")
+            st.code("\n".join(log_text.splitlines()[-40:]), language="text")
+            st.caption(f"日志存储路径: {DEFAULT_LOG_FILE}")
+        else:
+            st.info("尚无后台系统日志输出。")
 
 
 def main() -> None:

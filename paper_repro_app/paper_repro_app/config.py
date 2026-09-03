@@ -7,7 +7,7 @@ import yaml
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "db_path": "paper_repro_app/data/tasks.db",
+    "db_path": str(Path(__file__).resolve().parents[1] / "data" / "tasks.db"),
     "app_title": "Paper Repro Runner",
     "default_remote_workdir": "/workspace/paper-repro",
     "default_data_dir": "~/data",

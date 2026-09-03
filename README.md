@@ -103,7 +103,57 @@ pip install -r paper_repro_app/requirements.txt
 streamlit run paper_repro_app/app.py --server.address 0.0.0.0 --server.port 8505
 ```
 
-## 6. 访问方式
+## 6. SSH 自动配置（推荐）
+
+如果你要连接远程云服务器，推荐先生成一个稳定的 SSH alias，而不是每次手动重复填写命令。
+
+```bash
+python scripts/setup_ssh_profile.py \
+  --alias papercloud \
+  --host connect.cqa1.seetacloud.com \
+  --user root \
+  --port 12680 \
+  --key ~/.ssh/id_ed25519
+```
+
+也可以直接从原始 SSH 命令生成：
+
+```bash
+python scripts/setup_ssh_profile.py --target "ssh -p 12680 root@connect.cqa1.seetacloud.com -i ~/.ssh/id_ed25519"
+```
+
+生成后，可在控制台面板中直接填入 `ssh papercloud` 或在 Terminal 中一键测试连接。
+
+## 7. 后台运行日志与错误快速定位诊断
+
+应用内置了结构化日志轮转系统（`paper_repro_app/logs/app.log`）与智能日志分析诊断引擎，支持每次调试或处理报错时**秒级精准定位错误点**：
+
+1. **命令行快捷分析**（直接在终端运行）：
+   ```bash
+   python scripts/diagnose_logs.py
+   ```
+   * 自动识别系统最新的失败任务与报错行
+   * 精确归类错误类型（SSH 认证断开、Conda 命令缺失、pip 镜像超时、Git 克隆超时、CUDA 显存溢出等）
+   * 高亮定位引发崩溃的关键代码/日志片段，并输出直观的根因与修复建议
+
+2. **UI 大屏面板实时诊断**：
+   在 Streamlit 面板的“最近任务与错误定位诊断”栏目下，每个失败的任务都会自动挂载专属的 **`🔍 错误定位与根因诊断`** 展开卡片，方便一键定位排查。
+
+```bash
+python scripts/setup_ssh_profile.py \
+  --alias papercloud \
+  --ssh-command "ssh -p 12680 root@connect.cqa1.seetacloud.com -i ~/.ssh/id_ed25519"
+```
+
+这样之后就可以直接用：
+
+```bash
+ssh papercloud
+```
+
+它会自动写入 `~/.ssh/config`，并且优先使用标准 SSH 配置文件，而不是在项目里硬编码私钥或临时凭证。
+
+## 7. 访问方式
 
 本机访问：
 

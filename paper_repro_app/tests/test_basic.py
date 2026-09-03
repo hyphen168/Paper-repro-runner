@@ -6,6 +6,8 @@ SPEC = importlib.util.spec_from_file_location("streamlit_app_module", APP_PATH)
 APP_MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(APP_MODULE)
 parse_ssh_target = APP_MODULE.parse_ssh_target
+resolve_repo_url = APP_MODULE.resolve_repo_url
+detect_remote_workdir = APP_MODULE.detect_remote_workdir
 
 from paper_repro_app.artifacts import ArtifactCollector
 from paper_repro_app.config_store import LocalConfigStore
@@ -34,16 +36,41 @@ def test_task_store_round_trip(tmp_path):
     )
     assert task["id"] == "task-123"
     assert store.get_task("task-123")["repo_url"] == "https://github.com/example/demo"
+    assert store.get_task("task-123")["port"] == "22"
 
     store.update_task_status("task-123", "running", "start")
     store.append_task_log("task-123", "step 1 done")
     assert "step 1 done" in store.get_task("task-123")["log"]
 
 
+def test_task_store_persists_remote_ssh_port(tmp_path):
+    store = TaskStore(tmp_path / "tasks.db")
+    task = store.create_task(
+        paper_url="https://arxiv.org/abs/2407.02988",
+        repo_url="https://github.com/example/demo",
+        host="connect.cqa1.seetacloud.com",
+        user="root",
+        port="12680",
+        ssh_key_path="",
+        remote_workdir="/root/autodl-tmp/paper-repro",
+        local_data_dir=str(tmp_path),
+    )
+    assert task["port"] == "12680"
+
+
 def test_extract_repo_url_handles_known_hosts():
     repo_url = "https://github.com/example/repro-project"
     assert repo_url in repo_url
     assert "github.com" in repo_url
+
+
+def test_explicit_repo_hint_overrides_automatic_repo_detection():
+    repo_url = "https://github.com/hyphen168/Yolov5m-NEU-DET.git"
+    assert resolve_repo_url(repo_url, "https://huggingface.co/huggingface") == repo_url
+
+
+def test_generic_huggingface_detection_is_not_used_as_source_code_repo():
+    assert resolve_repo_url("", "https://huggingface.co/huggingface") == ""
 
 
 def test_parse_ssh_target_keeps_port_out_of_host_and_uses_ssh_values():
@@ -71,6 +98,60 @@ def test_parse_ssh_config_reads_host_port_and_user(monkeypatch, tmp_path):
     assert profile["user"] == "root"
 
 
+def test_write_ssh_profile_creates_reusable_alias(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    config_path = tmp_path / ".ssh" / "config"
+    written_path = APP_MODULE.write_ssh_profile(
+        "papercloud",
+        "connect.cqa1.seetacloud.com",
+        "root",
+        "12680",
+        "~/.ssh/id_ed25519",
+        config_path=config_path,
+    )
+    content = written_path.read_text(encoding="utf-8")
+    assert written_path == config_path
+    assert "Host papercloud" in content
+    assert "HostName connect.cqa1.seetacloud.com" in content
+    assert "Port 12680" in content
+    assert "User root" in content
+
+
+def test_ensure_default_ssh_keypair_creates_reusable_key(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    private_key, public_key = APP_MODULE.ensure_default_ssh_keypair()
+    assert Path(private_key).is_file()
+    assert (tmp_path / ".ssh" / "id_ed25519.pub").is_file()
+    assert public_key.startswith("ssh-ed25519 ")
+
+
+def test_invalid_ssh_key_path_is_ignored(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    runner = RemoteRunner({
+        "host": "example.com",
+        "user": "ubuntu",
+        "ssh_key_path": "rkjrPg4Okyj/",
+        "repo_url": "https://github.com/example/repro-project",
+        "remote_workdir": "/workspace/demo",
+    })
+    auth = runner.detect_ssh_auth_sources()
+    assert auth["resolved_key"] is None
+    assert auth["has_any_auth"] in {False, True}
+
+
+def test_remote_runner_accepts_password_fallback():
+    runner = RemoteRunner({
+        "host": "example.com",
+        "user": "ubuntu",
+        "password": "secret123",
+        "repo_url": "https://github.com/example/repro-project",
+        "remote_workdir": "/workspace/demo",
+        "environment_mode": "venv",
+    })
+    assert runner.password == "secret123"
+    assert "password" in runner.execute.__code__.co_names
+
+
 def test_remote_runner_uses_single_shell_script():
     runner = RemoteRunner({
         "host": "example.com",
@@ -84,6 +165,83 @@ def test_remote_runner_uses_single_shell_script():
     assert "set -euo pipefail" in script
     assert "bash -lc" not in script
     assert ". .venv/bin/activate" in script
+
+
+def test_remote_runner_uses_shallow_lfs_free_clone():
+    runner = RemoteRunner({
+        "host": "example.com",
+        "user": "ubuntu",
+        "repo_url": "https://github.com/example/repro-project",
+        "remote_workdir": "/workspace/demo",
+    })
+    clone_command = runner.build_pipeline()[1]["command"]
+    assert "GIT_LFS_SKIP_SMUDGE=1" in clone_command
+    assert "--depth 1" in clone_command
+    assert "--no-tags" in clone_command
+    assert "--progress" in clone_command
+    assert "git ls-remote --heads" in clone_command
+    assert "http.lowSpeedTime 45" in clone_command
+    assert "timeout 13 git ls-remote --heads" in clone_command
+    assert "timeout 600 git clone" in clone_command
+    assert "界面填写公开的加速仓库地址" in clone_command
+
+
+def test_remote_runner_discovers_and_installs_missing_import_dependencies():
+    runner = RemoteRunner({
+        "host": "example.com",
+        "user": "ubuntu",
+        "repo_url": "https://github.com/example/repro-project",
+        "remote_workdir": "/workspace/demo",
+    })
+    dependency_command = next(
+        step["command"] for step in runner.build_pipeline()
+        if step["id"] == "dependencies"
+    )
+    assert "AUTO_DISCOVERED_PACKAGES" in dependency_command
+    assert "opencv-python" in dependency_command
+    assert "python -m pip check" in dependency_command
+
+
+def test_remote_runner_switches_pip_mirror_after_slow_install():
+    runner = RemoteRunner({
+        "host": "example.com",
+        "user": "ubuntu",
+        "repo_url": "https://github.com/example/repro-project",
+        "remote_workdir": "/workspace/demo",
+    })
+    install_command = next(
+        step["command"] for step in runner.build_pipeline()
+        if step["id"] == "install"
+    )
+    assert "pip_install_with_fallback" in install_command
+    assert "当前依赖源安装失败或超时，自动切换下一个备用源重试" in install_command
+    assert "pypi.tuna.tsinghua.edu.cn" in install_command
+    assert "mirrors.aliyun.com" in install_command
+
+
+def test_remote_runner_recovers_from_missing_conda_path_and_scans_datasets():
+    runner = RemoteRunner({
+        "host": "example.com",
+        "user": "root",
+        "repo_url": "https://github.com/example/repro-project",
+        "remote_workdir": "/root/autodl-tmp/paper-repro",
+    })
+    steps = {step["id"]: step["command"] for step in runner.build_pipeline()}
+    assert "/root/miniconda3/bin/conda" in steps["env"]
+    assert 'export PATH="$(dirname "$CONDA_BIN"):$PATH"' in steps["env"]
+    assert "自动回退到 Python venv" in steps["env"]
+    assert "扫描数据集配置文件" in steps["dataset"]
+    assert "未经授权或错误的数据集" in steps["dataset"]
+
+
+def test_remote_runner_uses_autodl_data_disk_for_root():
+    runner = RemoteRunner({
+        "host": "example.com",
+        "user": "root",
+        "repo_url": "https://github.com/example/repro-project",
+        "remote_workdir": "/root/autodl-tmp/paper-repro",
+    })
+    assert runner.remote_workdir == "/root/autodl-tmp/paper-repro"
 
 
 def test_remote_runner_accepts_private_key_contents():
@@ -179,3 +337,72 @@ def test_summary_and_comparison_helpers_are_usable():
     assert "论文复现项目总结" in summary
     assert "mAP" in table
     assert "0.81" in table
+
+
+def test_sqlite_open_helper(tmp_path):
+    from paper_repro_app.database import TaskStore
+    db_file = tmp_path / "test.db"
+    store = TaskStore(db_file)
+    task = store.create_task(paper_url="http://test.com", repo_url="http://github.com/test/repo", host="1.2.3.4", user="root", port="1234")
+    assert task["port"] == "1234"
+    assert task["repo_url"] == "http://github.com/test/repo"
+
+
+def test_auto_repo_dataset_crawler():
+    from paper_repro_app.repo_crawler import AutoRepoDatasetCrawler
+
+    crawler = AutoRepoDatasetCrawler()
+    res = crawler.evaluate_and_rank_candidates(
+        paper_url="https://arxiv.org/abs/2407.02988",
+        user_repo_hint="https://github.com/hyphen168/Yolov5m-NEU-DET",
+    )
+    assert res["best_candidate"] is not None
+    assert "Yolov5m-NEU-DET" in res["best_candidate"]["repo_url"]
+    assert "dataset_info" in res
+    assert "NEU-DET" in res["dataset_info"]["name"]
+
+
+
+def test_logging_config_and_log_analyzer(tmp_path):
+    from paper_repro_app.logging_config import setup_logger
+    from paper_repro_app.log_analyzer import LogAnalyzer
+
+    test_log = tmp_path / "logs" / "test.log"
+    logger = setup_logger("test_logger", log_file=test_log)
+    logger.info("Testing logging config setup")
+    logger.error("Fake Error: WinError 10054 Connection refused")
+
+    assert test_log.exists()
+    content = test_log.read_text(encoding="utf-8")
+    assert "Testing logging config setup" in content
+    assert "WinError 10054" in content
+
+    analyzer = LogAnalyzer()
+    report = analyzer.analyze_log(content)
+    assert report["has_error"] is True
+    assert report["error_category"] == "SSH认证与连接"
+    assert "WinError 10054" in report["error_snippet"]
+    assert "追加到云端的" in report["suggestion"]
+
+
+def test_detect_remote_workdir_isolates_different_papers():
+    dir_paper1 = detect_remote_workdir("https://github.com/hyphen168/Yolov5m-NEU-DET", user="root")
+    dir_paper2 = detect_remote_workdir("https://github.com/foo/resnet50-cifar", user="root")
+    assert dir_paper1 == "/root/autodl-tmp/Yolov5m-NEU-DET"
+    assert dir_paper2 == "/root/autodl-tmp/resnet50-cifar"
+    assert dir_paper1 != dir_paper2
+
+
+def test_remote_runner_resets_workspace_for_same_paper():
+    runner = RemoteRunner({
+        "host": "example.com",
+        "user": "root",
+        "repo_url": "https://github.com/hyphen168/Yolov5m-NEU-DET",
+        "remote_workdir": "/root/autodl-tmp/Yolov5m-NEU-DET",
+    })
+    clone_cmd = next(step["command"] for step in runner.build_pipeline() if step["id"] == "clone")
+    assert "git reset --hard FETCH_HEAD" in clone_cmd
+    assert "git clean -ffdx" in clone_cmd
+    assert "rm -rf repo" in clone_cmd
+
+
