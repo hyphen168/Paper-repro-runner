@@ -32,7 +32,7 @@ ZIP_EXCLUDE_PATTERNS = ("*.egg-info",)
 # 本地清理仅移除小型缓存（不碰 .venv/数据/日志，安全快速）
 LOCAL_CLEAN_DIRS = {"__pycache__", ".pytest_cache", "*.egg-info"}
 
-VERSION = "1.3.0"
+VERSION = "1.5.0"
 
 FRIEND_GUIDE = """============================================================
   Paper Repro Runner（论文复现助手）使用说明

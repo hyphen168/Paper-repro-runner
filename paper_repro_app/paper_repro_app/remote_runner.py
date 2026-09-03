@@ -43,6 +43,11 @@ except ImportError:  # pragma: no cover
 
 
 class RemoteStepError(RuntimeError):
+    """远程步骤失败。"""
+
+
+class TaskCancelled(RuntimeError):
+    """任务被用户取消。"""
     """A remote command failure that cannot be resolved by reconnecting."""
 
 
@@ -631,7 +636,11 @@ class RemoteRunner:
     def execute(
         self,
         on_step: Callable[[str, str, str], None] | None = None,
+        cancel_event=None,
     ) -> Dict[str, Any]:
+        self._cancel_event = cancel_event
+        if cancel_event is not None and cancel_event.is_set():
+            return {"status": "cancelled", "message": "任务已被用户取消（尚未开始执行）。"}
         if not self.host or not self.user:
             return {"status": "failed", "message": "云服务器连接信息不完整，请补充主机和用户名。"}
 
@@ -704,6 +713,8 @@ class RemoteRunner:
 
                 logs: List[str] = []
                 for step in self.build_pipeline():
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise TaskCancelled("任务已被用户取消")
                     step_id = step["id"]
                     step_title = step["title"]
                     self._log.info(f"开始步骤 [{step_id}]: {step_title}")
@@ -741,6 +752,10 @@ class RemoteRunner:
                             msg = f"{step_title} 超过 {self.command_timeout // 60} 分钟仍未完成。"
                             self._log.error(f"步骤 [{step_id}] 执行超时: {msg}")
                             raise TimeoutError(msg)
+                        if cancel_event is not None and cancel_event.is_set():
+                            channel.close()
+                            self._log.info(f"步骤 [{step_id}] 被用户取消，已断开远端连接。")
+                            raise TaskCancelled("任务已被用户取消")
                         time.sleep(0.2)
 
                     while channel.recv_ready():
@@ -800,6 +815,9 @@ class RemoteRunner:
                     "artifacts": collection.get("artifacts", []),
                     "attempts": attempt,
                 }
+            except TaskCancelled as exc:
+                last_error = exc
+                break
             except Exception as exc:  # pragma: no cover
                 last_error = exc
                 if isinstance(exc, RemoteStepError):
@@ -815,6 +833,13 @@ class RemoteRunner:
                         ssh.close()
                     except Exception:
                         pass
+
+        if isinstance(last_error, TaskCancelled):
+            return {
+                "status": "cancelled",
+                "message": "任务已被用户中止。",
+                "attempts": attempt if "attempt" in dir() else 0,
+            }
 
         if _is_auth_exception(last_error):
             auth_state = self.detect_ssh_auth_sources()

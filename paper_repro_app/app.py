@@ -26,8 +26,9 @@ from paper_repro_app.ssh_utils import (ensure_default_ssh_keypair, ensure_ssh_ke
                                        resolve_ssh_profile, test_ssh_connection, write_ssh_profile)
 from paper_repro_app.task_utils import (format_log_preview, get_local_ips, get_step_order,
                                         get_status_color, read_log_tail)
-from paper_repro_app.storage_utils import (_get_exec_state, detect_remote_workdir, ensure_local_storage_tree,
-                                           resolve_repo_url, start_pipeline_execution)
+from paper_repro_app.storage_utils import (_get_exec_state, cancel_task, detect_remote_workdir,
+                                           ensure_local_storage_tree, is_task_running, resolve_repo_url,
+                                           start_pipeline_execution)
 from paper_repro_app.logger_utils import enrich_log_for_display
 from paper_repro_app.paths import DB_PATH, migrate_legacy_data
 from paper_repro_app.repo_crawler import AutoRepoDatasetCrawler
@@ -467,8 +468,9 @@ def _render_monitor_content(task_id: str) -> None:
                 st.json(result if isinstance(result, dict) else {"raw": str(result)[:4000]})
         # 执行中（queued/running）：有实时滚动日志面板 + 步进器即可，不再叠加提示
         if st.button("结束当前任务", key=f"cancel_{task_id}"):
-            store.update_task_status(task_id, "cancelled", "用户主动结束当前任务。", current_step="cancelled")
-            st.warning("当前任务已结束，新的任务可以继续提交。")
+            store.update_task_status(task_id, "cancelled", "正在中止任务：已通知后台中断云端执行...", current_step="cancelled")
+            cancel_task(task_id)
+            st.warning("任务已请求中止：后台线程已中断并断开云端连接。")
 
         if st.button("重新执行流水线", key=f"run_{task_id}"):
             started, run_msg = start_pipeline_execution(task_id)
@@ -685,9 +687,8 @@ def render_app() -> None:
             ssh_key_path = st.text_input("SSH 私钥路径（或粘贴私钥全文）", value=default_ssh_key)
             ssh_alias = st.text_input("SSH 配置别名", value=saved.get("ssh_alias", "papercloud"))
             if generated_ssh_public_key:
-                with st.expander("SSH 免密登录公钥（需用时展开复制）", expanded=False):
-                    st.caption("追加到云服务器 /root/.ssh/authorized_keys 后即可免密码登录。")
-                    st.code(generated_ssh_public_key, language="text")
+                st.caption("免密公钥（追加到云端 /root/.ssh/authorized_keys 后即可免密登录，需用时复制）：")
+                st.code(generated_ssh_public_key, language="text")
             bc1, bc2, bc3 = st.columns(3)
             with bc1:
                 gen_profile_btn = st.button("生成 SSH 配置", use_container_width=True, key="gen_ssh_profile")
@@ -776,7 +777,14 @@ def render_app() -> None:
             if active_tasks:
                 st.warning("检测到已有未结束任务，系统将自动中止旧任务并直接开始新任务。")
                 for active_task in active_tasks:
-                    store.update_task_status(active_task["id"], "cancelled", "已被更高优先级任务替换，旧任务被终止。", current_step="cancelled")
+                    store.update_task_status(active_task["id"], "cancelled", "已被更高优先级任务替换，正在中止旧任务。", current_step="cancelled")
+                    cancel_task(active_task["id"], wait_seconds=6.0)
+                # 等待旧线程完全退出，避免新任务无执行者
+                import time as _time
+                for _ in range(10):
+                    if not any(is_task_running(t["id"]) for t in active_tasks):
+                        break
+                    _time.sleep(0.5)
 
             config_store.save(
                 {
@@ -844,6 +852,8 @@ def render_app() -> None:
 
             store.update_task_status(task["id"], "running", "任务已进入云端执行阶段，准备按流水线执行复现步骤。", current_step="prepare")
             started, startup_msg = start_pipeline_execution(task["id"], password=cloud_password)
+            if not started:
+                st.error(f"新任务未能启动：{startup_msg}。旧任务可能仍在结束中，请稍候在「任务监控」点击重新执行。")
             st.rerun()
 
 

@@ -33,8 +33,9 @@ def _run_pipeline_in_background(task_id: str) -> None:
     task = store.get_task(task_id)
     if not task:
         return
-    # 密码只存在于进程内存（提交时注入），不落库：从执行状态按任务取回
-    task["password"] = (_get_exec_state().get("task_password") or "") if _get_exec_state().get("task_id") == task_id else ""
+    # 密码只存在于进程内存（提交时注入），不落库：按任务 id 从内存密码表取回
+    task["password"] = str(_get_exec_state().get("task_passwords", {}).get(task_id) or "")
+    cancel_event = _get_exec_state().get("cancel_events", {}).get(task_id)
     runner = RemoteRunner(task)
     live_log: list[str] = []
 
@@ -50,7 +51,7 @@ def _run_pipeline_in_background(task_id: str) -> None:
         "已开始连接云端。若代码源在 13 秒内无响应，系统会立即提示网络或仓库地址问题。",
     )
     try:
-        result = runner.execute(on_step=on_step)
+        result = runner.execute(on_step=on_step, cancel_event=cancel_event)
     except Exception as exc:  # 兜底：线程内任何异常都必须落库，避免页面永远停留在“运行中”
         result = {"status": "failed", "message": f"流水线执行异常：{exc}"}
         store.update_task_status(task_id, "failed", json.dumps(result, ensure_ascii=False, indent=2), current_step="failed")
@@ -65,7 +66,9 @@ def _run_pipeline_in_background(task_id: str) -> None:
         # 失败/取消：只落日志与诊断，不再生成“成功报告”（避免误导）
         if str(result.get("status", "")).lower() != "success":
             payload = json.dumps(result, ensure_ascii=False, indent=2)
-            status = result.get("status", "failed")
+            status = str(result.get("status", "failed")).lower()
+            if status == "cancelled":
+                status = "cancelled"
             store.update_task_status(task_id, status, payload, current_step=result.get("failed_step") or status)
             return
 
@@ -121,6 +124,8 @@ def start_pipeline_execution(task_id: str, password: str = "") -> tuple[bool, st
     thread = state.get("thread")
     if thread is not None and thread.is_alive():
         return False, "已有流水线正在后台运行，请等待其结束后再重试。"
+    state.setdefault("task_passwords", {})[task_id] = password or state.get("task_passwords", {}).get(task_id, "")
+    state.setdefault("cancel_events", {})[task_id] = threading.Event()
     new_thread = threading.Thread(
         target=_run_pipeline_in_background,
         args=(task_id,),
@@ -129,11 +134,33 @@ def start_pipeline_execution(task_id: str, password: str = "") -> tuple[bool, st
     )
     state["thread"] = new_thread
     state["task_id"] = task_id
-    if password:
-        state["task_password"] = password
     state["started_at"] = datetime.now()
     new_thread.start()
     return True, "流水线已在后台启动，页面每 2 秒自动刷新实时进度。"
+
+
+def cancel_task(task_id: str, wait_seconds: float = 8.0) -> bool:
+    """请求中止任务：置取消事件并等待后台线程退出（尽力而为）。
+
+    远端 SSH 读取循环会在 0.2s 内感知并断开连接，使远端命令进程随之终止。
+    返回线程是否已退出。
+    """
+    state = _get_exec_state()
+    evt = state.get("cancel_events", {}).get(task_id)
+    if evt is not None:
+        evt.set()
+    thread = state.get("thread")
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=wait_seconds)
+        return not thread.is_alive()
+    return True
+
+
+def is_task_running(task_id: str) -> bool:
+    """当前是否有该任务的后台线程正在执行。"""
+    state = _get_exec_state()
+    thread = state.get("thread")
+    return bool(thread is not None and thread.is_alive() and state.get("task_id") == task_id)
 
 
 def resolve_repo_url(repo_hint: str, detected_repo: str | None) -> str:

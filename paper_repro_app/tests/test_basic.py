@@ -618,3 +618,30 @@ def test_auto_run_command_not_quoted_as_single_word():
     # 变量以裸文本出现在命令中交由 bash -c 展开分词（修复前为整词双引号形式）
     assert '${PAPER_REPRO_AUTO_RUN_COMMAND}' in run_cmd
     assert '"${PAPER_REPRO_AUTO_RUN_COMMAND}"' not in run_cmd.replace(chr(92), '')
+
+
+def test_execute_cancelled_before_connect():
+    """取消事件预置时 execute 立即返回 cancelled，且不发起 SSH 连接。"""
+    import threading
+
+    runner = RemoteRunner({
+        "host": "no-such-host.invalid",
+        "user": "ubuntu",
+        "repo_url": "https://github.com/example/repro-project",
+        "remote_workdir": "/workspace/demo",
+        "password": "secret",
+    })
+    evt = threading.Event()
+    evt.set()
+    result = runner.execute(cancel_event=evt)
+    assert result.get("status") == "cancelled"
+
+
+def test_cancel_task_idempotent():
+    """取消接口对不存在任务/无活动线程均安全返回。"""
+    import threading
+    from paper_repro_app.storage_utils import cancel_task
+
+    assert cancel_task("__never_exists__") is True
+    evt = threading.Event()
+    assert not evt.is_set()
