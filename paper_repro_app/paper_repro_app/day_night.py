@@ -130,11 +130,6 @@ PALETTES: Dict[str, dict] = {
                          "glow_c": 0.80, "glow_m": 0.95, "glow_y": 0.35, "ca": 0.50, "cb": 0, "star": 0.95},
 }
 
-# 事件偏移（分钟），日出 RS/日没 SS：0 / RS−90 / RS−30 / RS+30 / RS+125 / SS−125 / SS−30 / SS+20 / SS+40 / SS+90 / 1440
-# 段 [i, i+1) 归属相位（段中点在上升/下降段对应相位）
-_SEG_PHASE = [0, 1, 2, 3, 4, 5, 6, 7, 8, 0]  # 9 段 -> 相位（P9 与 P1 相邻处理见 build_events）
-
-
 # ============ 颜色工具 ============
 def _hex_to_linear(h: str):
     h = h.lstrip("#")
@@ -321,3 +316,29 @@ def now_day_night_vars(prev: Optional[dict] = None) -> dict:
     """便捷入口：取定位并采样当前时刻。"""
     loc = load_location() or {"lat": 32.0, "lon": 0.0}
     return sample_vars(datetime.now(), loc["lat"], loc["lon"], prev=prev)
+
+# ============ 天气 → 天空色调联动 ============
+# 让画面语义与天气胶囊一致：阴/雨/雪/雾时把天空向灰蓝压暗，避免“阴天却亮蓝”的违和。
+# 权重保守（0.18~0.4），保留昼夜明暗层次。
+
+
+def weather_tint(v: dict, kind: str) -> dict:
+    """按天气对天空三色施加灰调（原地返回新 dict）。"""
+    weights = {
+        "cloudy": 0.20,
+        "fog": 0.26,
+        "rain": 0.30,
+        "heavy_rain": 0.36,
+        "storm": 0.40,
+        "snow": 0.14,
+    }
+    w = weights.get(kind, 0.0)
+    if w <= 0:
+        return v
+    tint = "#4E5A6B"
+    out = dict(v)
+    # 地平线暖带在坏天气下压得更狠，防止“黄昏金带出现在雨夜”
+    out["sky_top"] = mix_hex(v["sky_top"], tint, w * 0.9)
+    out["sky_mid"] = mix_hex(v["sky_mid"], tint, w)
+    out["sky_hor"] = mix_hex(v["sky_hor"], tint, min(1.0, w * 1.6))
+    return out

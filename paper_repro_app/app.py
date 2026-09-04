@@ -17,7 +17,7 @@ except Exception:  # pragma: no cover - GUI may not be available in headless env
 
 from paper_repro_app.config_store import LocalConfigStore
 from paper_repro_app.database import TaskStore
-from paper_repro_app.day_night import css_vars_block, now_day_night_vars
+from paper_repro_app.day_night import css_vars_block, now_day_night_vars, weather_tint
 from paper_repro_app.diagnostics import EnvironmentDiagnostics
 from paper_repro_app.log_analyzer import LogAnalyzer
 from paper_repro_app.logging_config import DEFAULT_LOG_FILE, get_logger
@@ -90,6 +90,10 @@ def render_particle_background() -> None:
     except Exception:
         weather = None
     info = describe(weather)
+    # 昼夜同源：优先用昼夜系统的实时太阳判定（含天气-城市时区），避免天气缓存 30 分钟滞后
+    _dn_day = st.session_state.get("dn_day")
+    if _dn_day is not None:
+        info["is_day"] = bool(_dn_day)
     preview = st.session_state.get("wx_preview", "auto")
     if preview and preview != "auto":
         # 预览覆盖：映射为 (kind, is_day)
@@ -239,19 +243,36 @@ def render_pipeline_steps(task: dict, store: TaskStore) -> None:
             st.code(step["command"])
 
 
+def _dn_sample_with_weather(prev=None) -> dict:
+    """昼夜采样并叠加天气天空色调（阴/雨/雪时压暗天空，保持画面语义一致）。"""
+    vars_now = now_day_night_vars(prev=prev)
+    try:
+        kind = describe(get_weather()).get("kind") or ""
+    except Exception:
+        kind = ""
+    if kind:
+        vars_now = weather_tint(vars_now, kind)
+    return vars_now
+
+
+def _dn_persist(vars_now: dict) -> None:
+    st.session_state["dn_prev"] = {k: vars_now[k] for k in (
+        "day_factor", "sky_top", "sky_mid", "sky_hor", "sun_a", "moon_a",
+        "star_alpha", "glow_c", "glow_m", "glow_y", "card_alpha", "card_bright",
+        "particle_bright")}
+    st.session_state["dn_day"] = 1 if vars_now["sun_a"] > 0.5 else 0
+
+
 @st.fragment(run_every=60.0)
 def _day_night_tick() -> None:
     """每 60 秒按本地太阳位置刷新昼夜 CSS 变量（天空/卡片/辉光随真实时间变化）。"""
     prev = st.session_state.get("dn_prev")
     try:
-        vars_now = now_day_night_vars(prev=prev)
+        vars_now = _dn_sample_with_weather(prev=prev)
     except Exception:
         vars_now = None
     if vars_now:
-        st.session_state["dn_prev"] = {k: vars_now[k] for k in (
-            "day_factor", "sky_top", "sky_mid", "sky_hor", "sun_a", "moon_a",
-            "star_alpha", "glow_c", "glow_m", "glow_y", "card_alpha", "card_bright",
-            "particle_bright")}
+        _dn_persist(vars_now)
         st.markdown(css_vars_block(vars_now), unsafe_allow_html=True)
     else:
         st.session_state.pop("dn_prev", None)
@@ -510,12 +531,9 @@ def render_app() -> None:
     if "dn_boot" not in st.session_state:
         st.session_state["dn_boot"] = True
         try:
-            _vars0 = now_day_night_vars()
+            _vars0 = _dn_sample_with_weather()
+            _dn_persist(_vars0)
             st.markdown(css_vars_block(_vars0), unsafe_allow_html=True)
-            st.session_state["dn_prev"] = {k: _vars0[k] for k in (
-                "day_factor", "sky_top", "sky_mid", "sky_hor", "sun_a", "moon_a",
-                "star_alpha", "glow_c", "glow_m", "glow_y", "card_alpha", "card_bright",
-                "particle_bright")}
         except Exception:
             pass
     else:
