@@ -806,22 +806,22 @@ def render_app() -> None:
     saved = config_store.load()
 
     with st.sidebar:
-        with st.expander("遇到问题？先看这里", expanded=False):
-            st.markdown(
-                """- **连不上服务器**：实例要开机；把控制台整行登录指令（ssh -p 端口 root@connect.xxx）粘到服务器地址框，点「测试 SSH 连接」
-- **认证失败**：核对密码；AutoDL 密码在控制台实例页设置/重置；或点「注入公钥到服务器」
-- **提示未训练/无指标**：任务详情会写明原因——没填数据集时在高级选项填 YAML 或数据直链
-- **报 CUDA/CPU torch 错误**：重新执行任务会自动重装 CUDA 版
-- **报缺少 Python 包**：重新执行即可（本次会中断并列出缺包）
-- **识别不到训练入口**：失败详情有「填入提交页修改命令」按钮，或选「实际运行」粘贴 README 训练命令
-- **换新论文怎么跑**：直接粘论文链接；仓库识别不出时手动填仓库地址即可，流程全自动
-- **数据在哪**：本机数据在用户目录 .paper_repro_app 与应用数据目录，应用文件夹可随时删除重装
-- 详细手册见应用目录 docs/troubleshoot/GUIDE.md"""
-            )
+        # ===== A 云服务器与任务 =====
+        st.markdown("##### 云服务器与任务")
+        st.caption("云端只执行，产物留在本机。")
+        st.caption(f"配置目录：{config_store.config_dir}")
 
-        with st.expander("AI 助手（失败自动调试）", expanded=False):
-            _ai_cfg = ai_load()
-            _has_key = bool(_ai_cfg.get("api_key"))
+
+        # ===== B 智能助手 =====
+        _ai_cfg = ai_load()
+        _has_key = bool(_ai_cfg.get("api_key"))
+        if "sb_ai_open" not in st.session_state:
+            st.session_state["sb_ai_open"] = not _has_key
+        _ai_badge = "● 未配置：失败可一键 AI 分析根因" if not _has_key else f"● 就绪：{(_ai_cfg.get('model') or '')[:22]} · 思考={_ai_cfg.get('thinking', 'standard')}"
+        st.markdown(f"**智能助手** <span style='color:{'var(--text-muted)' if _has_key else 'var(--yellow)'};font-size:0.72rem;font-weight:400;'>{_ai_badge}</span>", unsafe_allow_html=True)
+        with st.expander(("立即配置（约 1 分钟）" if not _has_key else "修改设置与测试"), expanded=st.session_state.get("sb_ai_open", False)):
+            st.session_state["sb_ai_open"] = True
+            _ai_cfg = _ai_cfg
             _providers = list(PROVIDERS.keys())
             _ai_provider = st.selectbox(
                 "服务商", _providers + ["自定义"],
@@ -868,9 +868,22 @@ def render_app() -> None:
                     ai_clear()
                     st.rerun()
             st.caption("AI 分析会把任务日志（已脱敏）发送到所选服务商。国内直连 OpenAI 官方通常不通，建议国内服务商。")
+
+
+        # ===== C 手机与远程（常驻：桌面=开启指引；远程=地址+受信管理） =====
         _expose_mode = os.environ.get("PAPER_REPRO_EXPOSE", "")
-        if _expose_mode in ("lan", "tunnel"):
-            with st.expander("手机直达与受信设备", expanded=False):
+        if "sb_remote_open" not in st.session_state:
+            st.session_state["sb_remote_open"] = not _expose_mode
+        _remote_badge = ("● 桌面本机 · 未开启远程" if not _expose_mode
+                         else ("● 局域网模式已启用" if _expose_mode == "lan" else "● 反隧模式已启用"))
+        st.markdown(f"**手机与远程** <span style='color:{'var(--text-muted)' if not _expose_mode else 'var(--green)'};font-size:0.72rem;font-weight:400;'>{_remote_badge}</span>", unsafe_allow_html=True)
+        with st.expander(("如何用手机访问" if not _expose_mode else "直达与受信设备"), expanded=st.session_state.get("sb_remote_open", False)):
+            st.session_state["sb_remote_open"] = True
+            if not _expose_mode:
+                st.markdown("本机模式不对外网开放（安全）。需要手机/平板访问时：")
+                st.code("start_app_remote.bat", language="text")
+                st.caption("① 双击上列脚本启动（同 WiFi 可用，控制台会显示手机访问地址并提示防火墙放行）；② 首次访问在页面设置访问口令；③ 之后在本组管理受信设备。人在外面可改用 start_tunnel.bat 走云服务器中转。")
+            else:
                 _host = "电脑局域网IP"
                 try:
                     import socket as _sk
@@ -880,10 +893,12 @@ def render_app() -> None:
                             break
                 except Exception:
                     pass
-                _direct = f"http://{_host}:8505"
-                st.markdown("**手机使用**（同一 WiFi）：")
-                st.code(_direct, language="text")
-                st.caption("步骤：① 首次访问会要求口令；② 输口令后勾选「信任此设备」并把直达链接（含 ?tk=）存入书签/添加到主屏；③ 之后点图标免口令进入。打不开时：确认电脑用 start_app_remote.bat 启动、防火墙已放行（open_firewall.bat）。")
+                if _expose_mode == "lan":
+                    _direct = f"http://{_host}:8505"
+                    st.code(_direct, language="text")
+                    st.caption("手机访问地址（同一 WiFi）。首次访问输口令；勾选「信任此设备」后把带 ?tk= 的地址存主屏即可免密直达。打不开时确认已运行 open_firewall.bat。")
+                else:
+                    st.caption("反隧模式：由 start_tunnel.bat 将应用映射到云机 127.0.0.1:18505，再经云平台公网 URL 访问（访问同样需口令）。")
                 st.markdown("**受信设备管理**（直达链接等同口令，请勿转发）：")
                 _tokens = gate_list()
                 if not _tokens:
@@ -902,17 +917,6 @@ def render_app() -> None:
                 if st.button("吊销全部受信设备（所有直达链接立即失效）", key="tk_revoke_all"):
                     gate_revoke_all()
                     st.rerun()
-        st.markdown("### 云端配置")
-        st.caption("本地保留任务与日志，云端只负责代码执行与实验重跑。推荐：SSH 私钥 + 自有云服务器。")
-        st.caption(f"用户配置目录：{config_store.config_dir}")
-        ips = get_local_ips()
-        if len(ips) > 1:
-            st.caption("局域网地址：" + " / ".join(f"http://{ip}:8505" for ip in ips if ip != "127.0.0.1"))
-        else:
-            st.caption("本机访问：http://127.0.0.1:8505")
-        if "task_id" in st.session_state:
-            st.info(f"当前任务：{st.session_state['task_id']}")
-
         st.markdown("---")
         st.markdown("##### 当地定位与天气")
         from paper_repro_app.weather_fx import (
@@ -957,6 +961,20 @@ def render_app() -> None:
             key="wx_preview",
             label_visibility="collapsed",
         )
+
+        # ===== E 帮助与手册 =====
+        with st.expander("遇到问题？先看这里", expanded=False):
+            st.markdown(
+                """- **连不上服务器**：实例要开机；把控制台整行登录指令（ssh -p 端口 root@connect.xxx）粘到服务器地址框，点「测试 SSH 连接」
+- **认证失败**：核对密码；AutoDL 密码在控制台实例页设置/重置；或点「注入公钥到服务器」
+- **提示未训练/无指标**：任务详情会写明原因——没填数据集时在高级选项填 YAML 或数据直链
+- **报 CUDA/CPU torch 错误**：重新执行任务会自动重装 CUDA 版
+- **报缺少 Python 包**：重新执行即可（本次会中断并列出缺包）
+- **识别不到训练入口**：失败详情有「填入提交页修改命令」按钮，或选「实际运行」粘贴 README 训练命令
+- **换新论文怎么跑**：直接粘论文链接；仓库识别不出时手动填仓库地址即可，流程全自动
+- **数据在哪**：本机数据在用户目录 .paper_repro_app 与应用数据目录，应用文件夹可随时删除重装
+- 详细手册见应用目录 docs/troubleshoot/GUIDE.md"""
+            )
 
     storage_state_key = "selected_local_data_dir"
     storage_default = st.session_state.get(storage_state_key) or saved.get("local_data_dir", str(Path.home() / "paper_repro_data"))
