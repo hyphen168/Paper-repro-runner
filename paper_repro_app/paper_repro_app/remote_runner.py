@@ -459,11 +459,17 @@ class RemoteRunner:
             "fi; "
             "if [ -n \"$autotry\" ]; then "
             "echo \"发现未映射 import（$autotry），逐个尝试直装（可选包，失败自动跳过；重型可选包直接跳过避免卡流程）...\"; "
+            "_t0=$(date +%s); "
             "for pkg in $autotry; do "
-            "case \"$pkg\" in tensorflow|tensorflowjs|albumentations|mmcv|mmdet|fairseq|fastai|openvino|nncf|mss) echo \"  跳过可选重型包 $pkg\"; continue;; esac; "
+            "[ $(( $(date +%s) - _t0 )) -gt 240 ] && { echo \"可选包补装总预算 240s 已用尽，跳过剩余包。\"; break; }; "
+
+            "case \"$pkg\" in tensorflow|tensorflowjs|tensorrt|albumentations|mmcv|mmdet|fairseq|fastai|openvino|nncf|mss) echo \"  跳过可选重型包 $pkg\"; continue;; esac; "
             "timeout 150 \"$PYTHON_BIN\" -m pip install --disable-pip-version-check --prefer-binary --index-url https://pypi.tuna.tsinghua.edu.cn/simple -q \"$pkg\" >/dev/null 2>&1 && echo \"  已补装 $pkg\" || echo \"  自动补装 $pkg 失败（已跳过，运行报错时请手动安装）\"; "
             "done; "
+            "_t0=$(date +%s); "
             "for pkg in $autotry; do "
+            "[ $(( $(date +%s) - _t0 )) -gt 240 ] && { echo \"可选包补装总预算 240s 已用尽，跳过剩余包。\"; break; }; "
+
             "timeout 240 \"$PYTHON_BIN\" -m pip install --disable-pip-version-check --prefer-binary --index-url https://pypi.tuna.tsinghua.edu.cn/simple -q \"$pkg\" >/dev/null 2>&1 && echo \"  已补装 $pkg\" || echo \"  自动补装 $pkg 失败（已跳过，运行报错时请手动安装）\"; "
             "done; "
             "fi; "
