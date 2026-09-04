@@ -31,7 +31,7 @@ if not defined PY_CMD goto :nopython
 rem ============================================================
 rem  启动引导（版本检查/虚拟环境/依赖安装都在 start_app.py 内完成）
 rem ============================================================
-%PY_CMD% start_app.py
+%PY_CMD% start_app.py %*
 if errorlevel 1 (
     echo.
     echo [Paper Repro] 启动失败，请将上方错误信息截图反馈给开发者。

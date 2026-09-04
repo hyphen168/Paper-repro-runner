@@ -558,6 +558,24 @@ code { background: rgba(0, 240, 255, 0.1); color: var(--cyan); border-radius: 4p
     .telemetry-grid { grid-template-columns: 1fr; }
     .fresh-header { flex-direction: column; align-items: flex-start; }
     .fx-step .cap { display: none; }
+    /* 手机端（mobile_access 规范 c）：列强制堆叠、触控目标、禁 iOS 聚焦放大 */
+    [data-testid="stHorizontalBlock"] { flex-direction: column !important; gap: 0.6rem !important; }
+    [data-testid="stColumn"] { flex: 1 1 100% !important; min-width: 0 !important; width: 100% !important; }
+    .stButton > button, div[data-testid="stFormSubmitButton"] button,
+    .stTextInput input, .stTextArea textarea, .stNumberInput input,
+    [data-testid="stSelectbox"] > div, .stTabs button[role="tab"] {
+        min-height: 44px !important;
+        font-size: 16px !important;
+    }
+    .stTabs [data-testid="stTabs"] button[role="tab"] { padding: 10px 12px !important; }
+    [data-testid="stMetricValue"] { font-size: 24px !important; }
+    .panel, .floating-card { padding: 0.75rem !important; }
+    .block-container { padding-top: 0.8rem !important; }
+    .fresh-header h1 { font-size: 1.7rem !important; }
+    .telemetry-log { font-size: 12.5px !important; }
+    .stRadio [role="radiogroup"] { flex-direction: column !important; align-items: stretch !important; }
+    /* 对比表容器级横滑 */
+    .stMarkdown table { display: block; overflow-x: auto; white-space: nowrap; max-width: 100%; }
 }
 /* ===== 头部仪表条集群（Step3：专家组 P2-2） ===== */
 .header-cluster { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; justify-content: flex-end; }

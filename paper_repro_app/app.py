@@ -23,6 +23,7 @@ from paper_repro_app.log_analyzer import LogAnalyzer
 from paper_repro_app.logging_config import DEFAULT_LOG_FILE, get_logger
 from paper_repro_app.paper_parser import extract_repo_url
 from paper_repro_app.ai_client import PROVIDERS, DEFAULT_PROVIDER, assert_no_key_leak, chat_once, sanitize_for_llm
+from paper_repro_app.access_gate import is_configured as gate_configured, set_access_code as gate_set, verify_access_code as gate_verify
 from paper_repro_app.ai_config import api_key_tail, clear_credentials as ai_clear, load_credentials as ai_load, save_credentials as ai_save
 from paper_repro_app.repo_profiles import get_for_repo, list_profiles, rebuild_profiles_from_db, remove_profile
 from paper_repro_app.remote_runner import RemoteRunner, inject_public_key, parse_ssh_candidates
@@ -360,11 +361,11 @@ def apply_task_state(task_id: str, status: str, current_step: str, message: str)
 
 def render_pipeline_steps(task: dict, store: TaskStore) -> None:
     """复现流水线区：完整命令默认折叠不堆积；默认展示“实时滚动播放”面板
-    （状态徽章 + 步骤进度 + 日志滚动窗口，每 2 秒自动刷新）。"""
+    （状态徽章 + 步骤进度 + 日志滚动窗口，每 3 秒自动刷新）。"""
     steps = RemoteRunner(task).build_pipeline()
     st.subheader("复现流水线")
 
-    @st.fragment(run_every=2.0)
+    @st.fragment(run_every=3.0)
     def live_monitor() -> None:
         state = _get_exec_state()
         thread = state.get("thread")
@@ -405,7 +406,7 @@ def render_pipeline_steps(task: dict, store: TaskStore) -> None:
             log_window = read_log_tail(22) or "等待任务开始..."
         st.markdown(
             f"<div class='panel' style='padding: 0.9rem;'>"
-            f"<div class='panel-title'>复现流水线 · 实时滚动播放（每 2 秒自动刷新，仅保留最新窗口不堆积）</div>"
+            f"<div class='panel-title'>复现流水线 · 实时滚动播放（每 3 秒自动刷新，仅保留最新窗口不堆积）</div>"
             f"<pre class='telemetry-log' style='max-height: 320px;'>{log_window}</pre>"
             f"</div>",
             unsafe_allow_html=True,
@@ -527,7 +528,7 @@ def _tune_collect() -> None:
     st.session_state["tune_args"] = _build_tune_args()
 
 
-@st.fragment(run_every=2.0)
+@st.fragment(run_every=3.0)
 def _auto_refresh_monitor(task_id: str) -> None:
     """任务执行中：每 2 秒自动刷新监控区，日志/步进器实时滚动。"""
     _render_monitor_content(task_id)
@@ -627,12 +628,17 @@ def _render_monitor_content(task_id: str) -> None:
             with st.expander("查看完整执行结果 (JSON)", expanded=False):
                 st.json(result if isinstance(result, dict) else {"raw": str(result)[:4000]})
         # 执行中（queued/running）：有实时滚动日志面板 + 步进器即可，不再叠加提示
-        if st.button("结束当前任务", key=f"cancel_{task_id}"):
+        if st.session_state.get(f"cfm_cancel_{task_id}") and st.button("确认结束该任务（云端执行将中断）", key=f"cfm_go_{task_id}", type="primary"):
+            st.session_state.pop(f"cfm_cancel_{task_id}", None)
             store.update_task_status(task_id, "cancelled", "正在中止任务：已通知后台中断云端执行...", current_step="cancelled")
             cancel_task(task_id)
             st.warning("任务已请求中止：后台线程已中断并断开云端连接。")
+        elif st.button("结束当前任务", key=f"cancel_{task_id}"):
+            st.session_state[f"cfm_cancel_{task_id}"] = True
+            st.rerun()
 
-        if st.button("重新执行流水线", key=f"run_{task_id}"):
+        if st.session_state.get(f"cfm_run_{task_id}") and st.button("确认重新执行（将再次产生云计费）", key=f"cfm_run_go_{task_id}", type="primary"):
+            st.session_state.pop(f"cfm_run_{task_id}", None)
             _mem_pwd = _get_exec_state().get("task_passwords", {}).get(task_id, "")
             if not _mem_pwd:
                 # 密码只存活于进程内存（重启/换会话即丢失）：现场补输后重执行
@@ -645,6 +651,9 @@ def _render_monitor_content(task_id: str) -> None:
                     st.rerun()
                 else:
                     st.warning(run_msg)
+        elif st.button("重新执行流水线", key=f"run_{task_id}"):
+            st.session_state[f"cfm_run_{task_id}"] = True
+            st.rerun()
         if st.session_state.get(f"rerun_need_pwd_{task_id}"):
             _pwd_col, _go_col = st.columns([3, 1])
             with _pwd_col:
@@ -659,8 +668,44 @@ def _render_monitor_content(task_id: str) -> None:
                     else:
                         st.warning(run_msg)
 
+def _access_gate() -> bool:
+    """远程访问口令门：expose=lan/tunnel 时启用；桌面本机模式直通。"""
+    expose = os.environ.get("PAPER_REPRO_EXPOSE", "")
+    if expose not in ("lan", "tunnel"):
+        return True
+    if st.session_state.get("auth_ok"):
+        return True
+    st.markdown("### 访问验证")
+    if not gate_configured():
+        st.caption("远程访问模式需要先设置访问口令（仅本机设置一次，用于保护你的任务与云服务器凭据）。")
+        _c1, _c2 = st.columns([3, 1])
+        with _c1:
+            _code = st.text_input("设置访问口令（至少 4 位）", type="password", key="gate_set_code")
+        with _c2:
+            if st.button("设置并进入", key="gate_set_btn", use_container_width=True):
+                if gate_set(_code):
+                    st.session_state["auth_ok"] = True
+                    st.rerun()
+                else:
+                    st.error("口令过短（至少 4 位），请重试。")
+    else:
+        _c1, _c2 = st.columns([3, 1])
+        with _c1:
+            _code = st.text_input("访问口令", type="password", key="gate_code")
+        with _c2:
+            if st.button("进入", key="gate_enter_btn", use_container_width=True):
+                if gate_verify(_code):
+                    st.session_state["auth_ok"] = True
+                    st.rerun()
+                else:
+                    st.error("口令不正确，请重试。")
+    st.stop()
+    return False
+
+
 def render_app() -> None:
     st.set_page_config(page_title="论文复现助手", layout="wide")
+    _access_gate()
     st.markdown(
         APP_CSS,
         unsafe_allow_html=True,

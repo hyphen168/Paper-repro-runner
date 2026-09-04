@@ -273,7 +273,7 @@ def open_browser(url: str, port: int) -> None:
         _log(f"未能自动打开浏览器（不影响使用，手动访问 {url}）: {exc}")
 
 
-def start_app() -> None:
+def start_app(expose: str = "") -> None:
     # 若默认端口已被占用，大概率是应用已在运行，直接打开浏览器而非再起一个实例
     if is_port_in_use(DEFAULT_PORT):
         url = f"http://127.0.0.1:{DEFAULT_PORT}"
@@ -283,9 +283,19 @@ def start_app() -> None:
 
     port = find_free_port()
     url = f"http://127.0.0.1:{port}"
+    bind_address = "127.0.0.1"
+    env_extra = {}
+    if expose in ("lan", "tunnel"):
+        env_extra["PAPER_REPRO_EXPOSE"] = expose
+        if expose == "lan":
+            bind_address = "0.0.0.0"
+            _log("局域网访问模式：将向同网段设备开放（已启用访问口令门）。")
 
     _log(f"应用启动中: {url}")
-    # P0-3：先起服务并等待端口就绪（≤20s）再打开浏览器，避免"无法访问此网站"
+    # 先起服务并等待端口就绪（≤20s）再打开浏览器，避免"无法访问此网站"
+    import os
+    full_env = dict(os.environ)
+    full_env.update(env_extra)
     proc = subprocess.Popen(
         [
             str(PYTHON_EXE),
@@ -296,11 +306,12 @@ def start_app() -> None:
             "--server.headless",
             "true",
             "--server.address",
-            "127.0.0.1",
+            bind_address,
             "--server.port",
             str(port),
         ],
         cwd=str(APP_DIR),
+        env=full_env,
     )
     deadline = time.time() + 20
     ready = False
@@ -314,9 +325,13 @@ def start_app() -> None:
     if ready:
         _log("服务已就绪，打开浏览器...")
         open_browser(url, port)
+        if expose == "lan":
+            for ip in get_local_ips():
+                if ip != "127.0.0.1":
+                    _log(f"手机/平板访问（同 WiFi）: http://{ip}:{port}")
+                    _log("提示：首次访问需输入访问口令（在页面设置）；如无法连接请以管理员运行 open_firewall.bat 放行防火墙。")
     else:
         _log("服务启动失败或超时（20s 内未就绪）。")
-    # P0-2：阻塞等待并检查退出码，非 0 打印中文原因（窗口不闪退由 bat 的 pause 保证）
     rc = proc.wait()
     if rc != 0:
         _log(f"应用进程异常退出（退出码 {rc}）。")
@@ -325,7 +340,12 @@ def start_app() -> None:
 
 
 if __name__ == "__main__":
+    import argparse
+    _parser = argparse.ArgumentParser(description="论文复现助手启动器")
+    _parser.add_argument("--expose", choices=["lan", "tunnel"], default="",
+                         help="远程访问模式：lan=局域网(0.0.0.0+口令)；tunnel=供 SSH 反隧回环（仍绑 127.0.0.1）")
+    _args = _parser.parse_args()
     check_system_python()
     ensure_virtualenv()
     ensure_dependencies()
-    start_app()
+    start_app(expose=_args.expose)
