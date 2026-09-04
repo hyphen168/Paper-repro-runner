@@ -259,6 +259,24 @@ def _render_failure_card(task_id: str, message: str, diag: dict, raw_result: str
             st.rerun()
 
 
+def _safe_log_diag(log_analyzer, text: str) -> dict:
+    """日志诊断兜底：任何日志内容都不允许让展示层崩溃（解析失败给可读降级结果）。"""
+    try:
+        diag = log_analyzer.analyze_log(text or "")
+        if isinstance(diag, dict) and diag.get("error_category"):
+            return diag
+    except Exception:
+        pass
+    snippet = str(text or "")[:800]
+    return {
+        "error_category": "日志内容异常",
+        "failed_step": "unknown",
+        "error_snippet": snippet or "（无可诊断内容）",
+        "cause": "日志包含无法自动解析的内容（可能是超长命令/特殊字符/非 JSON 载荷）。",
+        "suggestion": "请直接查看任务日志原文或「查看后台系统日志文件」；诊断失败不影响任务本身结论。",
+    }
+
+
 def _render_comparison_chart(comparison_rows: list | None) -> None:
     """复现 vs 论文 结果对比图：分组柱状图（仅渲染两侧都有数值的真实对比行）。
 
@@ -806,7 +824,7 @@ def _render_monitor_content(task_id: str) -> None:
             elif status == "failed":
                 fail_message = (result.get("message") or str(current_task.get("log") or ""))[:3000]
                 log_analyzer = LogAnalyzer()
-                diag = log_analyzer.analyze_log(json.dumps(result, ensure_ascii=False) or fail_message)
+                diag = _safe_log_diag(log_analyzer, json.dumps(result, ensure_ascii=False) or fail_message)
                 st.session_state[f"repo_url_{current_task.get('id')}"] = str(current_task.get("repo_url") or "")
                 _render_failure_card(
                     str(current_task.get("id") or "task"),
@@ -1787,7 +1805,7 @@ def render_app() -> None:
                 unsafe_allow_html=True,
             )
             if status in {"failed", "error"}:
-                diag = log_analyzer.analyze_log(task.get("log"))
+                diag = _safe_log_diag(log_analyzer, task.get("log"))
                 with st.expander(f"错误诊断 [{task['id']}] 错误定位与根因诊断", expanded=False):
                     st.error(f"错误类别: {diag['error_category']} | 触发步骤: {diag['failed_step']}")
                     st.markdown("**关键报错日志片段:**")
@@ -1832,12 +1850,20 @@ def render_app() -> None:
                 st.rerun()
 
         with st.expander("查看后台系统日志文件 (app.log)", expanded=False):
-            if DEFAULT_LOG_FILE.exists():
-                log_text = enrich_log_for_display(DEFAULT_LOG_FILE.read_text(encoding="utf-8", errors="replace"))
-                st.code("\n".join(log_text.splitlines()[-40:]), language="text")
-                st.caption(f"日志存储路径: {DEFAULT_LOG_FILE}")
-            else:
-                st.info("尚无后台系统日志输出。")
+            try:
+                if DEFAULT_LOG_FILE.exists():
+                    # 只读末尾约 256KB，避免整文件全量读取/转义在轮询时拖慢页面
+                    _size = DEFAULT_LOG_FILE.stat().st_size
+                    with DEFAULT_LOG_FILE.open("rb") as _fh:
+                        _fh.seek(max(0, _size - 256 * 1024))
+                        _raw = _fh.read().decode("utf-8", errors="replace")
+                    _tail = "\n".join(enrich_log_for_display(_raw).splitlines()[-60:])
+                    st.code(_tail, language="text")
+                    st.caption(f"日志存储路径: {DEFAULT_LOG_FILE}（仅显示末尾 60 行）")
+                else:
+                    st.info("尚无后台系统日志输出。")
+            except Exception:
+                st.info("后台日志暂不可读（可能正在轮转/被占用），稍后重试。")
 
     with tab_batch:
         st.markdown("#### 批量任务总览")
