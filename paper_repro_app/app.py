@@ -22,6 +22,7 @@ from paper_repro_app.diagnostics import EnvironmentDiagnostics
 from paper_repro_app.log_analyzer import LogAnalyzer
 from paper_repro_app.logging_config import DEFAULT_LOG_FILE, get_logger
 from paper_repro_app.paper_parser import extract_repo_url
+from paper_repro_app.repo_profiles import get_for_repo, list_profiles, rebuild_profiles_from_db, remove_profile
 from paper_repro_app.remote_runner import RemoteRunner, inject_public_key, parse_ssh_candidates
 from paper_repro_app.ssh_utils import (ensure_default_ssh_keypair, ensure_ssh_key_file,
                                        resolve_ssh_profile, test_ssh_connection, write_ssh_profile)
@@ -830,13 +831,29 @@ def render_app() -> None:
                 label_visibility="collapsed",
             )
 
+            # 仓库档案建议（同一仓库第二次跑：秒配）
+            _rp_hint = get_for_repo(repo_hint.strip()) if (repo_hint or "").strip() else None
+            if _rp_hint and _rp_hint.get("run_command") and "rp_fill" not in st.session_state:
+                _rc = _rp_hint.get("run_command") or ""
+                _dc = _rp_hint.get("data_config") or ""
+                _t = (_rp_hint.get("last_success_at") or "")[:16].replace("T", " ")
+                st.caption(
+                    f"检测到该仓库上次成功配置（{_t}，成功 {_rp_hint.get('success_count') or 1} 次）：{_rc[:90]}"
+                    + (f"；数据集：{_dc[:60]}" if _dc else "")
+                )
+                if st.button("填入上次成功配置", key="rp_fill_btn"):
+                    st.session_state["rp_fill"] = {"run_command": _rc, "data_config": _dc}
+                    st.rerun()
+            _rp_fill = st.session_state.pop("rp_fill", None) if "rp_fill" in st.session_state else None
+            _fill_cmd = (_rp_fill or {}).get("run_command", "") if _rp_fill else ""
             if run_mode == "run":
                 run_command = st.text_area(
                     "训练或推理命令",
-                    value="",
+                    value=_fill_cmd or st.session_state.get("rp_cmd", ""),
                     placeholder="例如：python train.py --data data/coco128.yaml --epochs 50",
                     help="将原样在云端仓库目录执行；可使用 ${PAPER_REPRO_DATA_CONFIG} 引用自动准备的数据集 YAML 路径。",
                 )
+                st.session_state["rp_cmd"] = run_command
             else:
                 run_command = ""
 
@@ -942,6 +959,12 @@ def render_app() -> None:
         if submitted:
             auto_run = run_mode in {"auto", "tune"}
             selected_run_command = run_command.strip() if run_mode == "run" else ""
+            # 档案自动采用：auto 模式 + 无手填命令 + 仓库有成功档案 -> 沿用上次成功命令与数据配置
+            _rp_auto = get_for_repo(repo_hint.strip()) if (repo_hint or "").strip() else None
+            if _rp_auto and _rp_auto.get("run_command") and not selected_run_command and run_mode == "auto":
+                selected_run_command = str(_rp_auto["run_command"])
+                if _rp_auto.get("data_config") and not data_config.strip():
+                    data_config = str(_rp_auto["data_config"])
             if run_mode == "run" and not selected_run_command:
                 st.error("请填写目标仓库的训练、验证或推理命令；不同论文的参数不能安全地自动假设。")
                 st.stop()
@@ -1154,6 +1177,34 @@ def render_app() -> None:
                 if isinstance(_payload, dict) and _payload.get("comparison_table"):
                     with st.expander(f"复现结果与论文对比 [{task['id']}]", expanded=False):
                         _render_success_result(_payload, task_meta=f"仓库 {task.get('repo_url') or ''} · 完成时间见任务记录")
+
+        with st.expander("仓库档案管理（同仓库第二次跑秒配的记忆库）", expanded=False):
+            _profiles = list_profiles()
+            if not _profiles:
+                st.caption("暂无档案：成功跑过任务的仓库会自动记住命令与数据配置。")
+            for _prof in _profiles[:10]:
+                _repo_short = (_prof.get("repo") or "").rsplit("/", 1)[-1]
+                _cmd = str(_prof.get("run_command") or "(未记录命令)")[:80]
+                _st_txt = "成功" if _prof.get("last_status") == "success" else (_prof.get("last_status") or "?")
+                st.markdown(
+                    f"<div class='panel-row' style='padding:0.5rem 0.8rem;margin:0.3rem 0;'>"
+                    f"<div style='display:flex;justify-content:space-between;gap:0.6rem;align-items:center;'>"
+                    f"<div><b style='color:var(--text-strong);'>{_repo_short}</b>"
+                    f"<span style='color:var(--muted);font-size:0.74rem;margin-left:0.5rem;'>{_st_txt} · 跑 {_prof.get('run_count') or 1} 次</span>"
+                    f"<div style='color:var(--text-secondary);font-size:0.78rem;font-family:var(--font-mono);'>{_cmd}</div></div>"
+                    f"<div style='display:flex;gap:0.4rem;'>"
+                    f"<button key='x' style='display:none;'></button></div></div></div>",
+                    unsafe_allow_html=True,
+                )
+                _del_col, _ = st.columns([1, 5])
+                with _del_col:
+                    if st.button("删除", key=f"rp_del_{_repo_short}"):
+                        remove_profile(_prof.get("repo") or "")
+                        st.rerun()
+            if st.button("从任务历史重建档案", key="rp_rebuild"):
+                _n = rebuild_profiles_from_db(store.list_tasks(limit=50))
+                st.success(f"已重建 {_n} 条仓库档案。")
+                st.rerun()
 
         with st.expander("查看后台系统日志文件 (app.log)", expanded=False):
             if DEFAULT_LOG_FILE.exists():
