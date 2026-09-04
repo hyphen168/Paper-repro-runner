@@ -1,4 +1,4 @@
 """Paper reproduction runner package."""
 
 __all__ = ["__version__"]
-__version__ = "2.1.0"
+__version__ = "2.0.0"

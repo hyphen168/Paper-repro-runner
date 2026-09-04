@@ -985,25 +985,25 @@ def render_app() -> None:
         # ============ 卡片 1：论文与云端（必填） ============
         with st.container(border=True):
             st.markdown("##### 论文与代码仓库")
-            paper_url = st.text_input("论文链接", value="", placeholder="https://arxiv.org/abs/xxxx 或留空直接填下方仓库地址")
-            repo_hint = st.text_input("代码仓库候选（可选，留空则从论文页面自动识别）", value="")
+            paper_url = st.text_input("论文链接", value=saved.get("paper_url", "https://arxiv.org/abs/2401.00001"))
+            repo_hint = st.text_input("代码仓库候选（可选，留空则从论文页面自动识别）", value=saved.get("repo_hint", ""))
             st.markdown("##### 云服务器（SSH）")
             c1, c2, c3, c4 = st.columns([3, 1, 1.4, 1.6])
             with c1:
                 cloud_host = st.text_input(
     "服务器地址 / IP（可多行填写多台候选，自动选用可达者）",
-    value="",
+    value=saved.get("cloud_host", "") or "",
     help="AutoDL 等实例每次开机地址可能变化：可一次粘贴多台（每行一条），也支持完整 ssh 命令如 ssh -p 38662 root@connect.xxx.seetacloud.com。提交任务时自动探测并选用第一台可达的机器。",
 )
             with c2:
-                ssh_port = st.text_input("端口", value="", placeholder="22")
+                ssh_port = st.text_input("端口", value=str(saved.get("ssh_port") or "22"))
             with c3:
-                cloud_user = st.text_input("用户名", value="", placeholder="root")
+                cloud_user = st.text_input("用户名", value=saved.get("cloud_user", "") or "root")
             with c4:
                 cloud_password = st.text_input("密码（留空则用 SSH 私钥）", value="", type="password")
             ssh_target = st.text_input(
                 "SSH 连接串（可选：填 user@host 或 ssh 命令会自动解析，覆盖上方字段）",
-                value="",
+                value=saved.get("ssh_target", ""),
                 placeholder="root@123.45.67.89 -p 22",
             )
             ssh_meta = resolve_ssh_profile(ssh_target, saved.get("cloud_host", ""), saved.get("cloud_user", ""), saved.get("ssh_key_path", ""))
@@ -1020,7 +1020,7 @@ def render_app() -> None:
                     unsafe_allow_html=True,
                 )
 
-            default_cloud_host = ssh_meta.get("host") or saved.get("cloud_host") or cloud_host.strip()
+            default_cloud_host = ssh_meta.get("host") or saved.get("cloud_host") or cloud_host.strip() or "my-server.example.com"
             default_cloud_user = ssh_meta.get("user") or saved.get("cloud_user") or cloud_user.strip() or "root"
             default_ssh_alias = saved.get("ssh_alias", "papercloud")
 
@@ -1090,7 +1090,7 @@ def render_app() -> None:
             clone_url = st.text_input("加速仓库地址（可选）", value=saved_clone_url, placeholder="留空使用官方仓库")
             pip_index_url = st.text_input("Python 依赖源（可选）", value=saved.get("pip_index_url", ""), placeholder="留空自动选择最快镜像")
             repo_probe_dir = st.text_input("本地仓库校验目录（可选）", value=saved.get("repo_probe_dir", ""))
-            remote_workdir = st.text_input("远程工作目录", value="", placeholder="默认 /workspace/paper-repro，可留空")
+            remote_workdir = st.text_input("远程工作目录", value=saved.get("remote_workdir", "") or detect_remote_workdir(repo_hint or paper_url, cloud_user, cloud_host))
             env_mode = st.selectbox("运行环境方式", ["conda", "venv", "docker"], index=0)
             data_config = st.text_input("数据集（YAML 路径 或 ZIP/TAR 直链）", value="", placeholder="如 data/coco128.yaml 或 https://.../dataset.zip", help="支持：① 云端仓库内的 YAML 相对路径；② http(s) 数据包直链——自动下载、解压并生成训练配置（YOLO 格式 images/ 与 labels/ 同级；无 val 目录时自动复用 train）。留空则由系统自动发现。")
 
@@ -1128,7 +1128,7 @@ def render_app() -> None:
             saved_ssh_key = saved.get("ssh_key_path", "")
             default_ssh_key = ssh_meta.get("key") or ensure_ssh_key_file(saved_ssh_key) or generated_ssh_key or "~/.ssh/id_ed25519"
             ssh_key_path = st.text_input("SSH 私钥路径（或粘贴私钥全文）", value=default_ssh_key)
-            ssh_alias = st.text_input("SSH 配置别名", value="", placeholder="papercloud")
+            ssh_alias = st.text_input("SSH 配置别名", value=saved.get("ssh_alias", "papercloud"))
             if generated_ssh_public_key:
                 st.caption("免密公钥（追加到云端 /root/.ssh/authorized_keys 后即可免密登录，需用时复制）：")
                 st.code(generated_ssh_public_key, language="text")
@@ -1172,7 +1172,12 @@ def render_app() -> None:
         if submitted:
             auto_run = run_mode in {"auto", "tune"}
             selected_run_command = run_command.strip() if run_mode == "run" else ""
-            # 档案复用为显式行为：界面已展示「填入上次成功配置」按钮，不做静默自动采用
+            # 档案自动采用：auto 模式 + 无手填命令 + 仓库有成功档案 -> 沿用上次成功命令与数据配置
+            _rp_auto = get_for_repo(repo_hint.strip()) if (repo_hint or "").strip() else None
+            if _rp_auto and _rp_auto.get("run_command") and not selected_run_command and run_mode == "auto":
+                selected_run_command = str(_rp_auto["run_command"])
+                if _rp_auto.get("data_config") and not data_config.strip():
+                    data_config = str(_rp_auto["data_config"])
             if run_mode == "run" and not selected_run_command:
                 st.error("请填写目标仓库的训练、验证或推理命令；不同论文的参数不能安全地自动假设。")
                 st.stop()
@@ -1204,13 +1209,10 @@ def render_app() -> None:
 
             ssh_target_value = ssh_target.strip()
             resolved_profile = resolve_ssh_profile(ssh_target_value, cloud_host.strip(), cloud_user.strip(), ssh_key_path.strip())
-            resolved_cloud_host = resolved_profile.get("host") or cloud_host.strip()
+            resolved_cloud_host = resolved_profile.get("host") or cloud_host.strip() or "my-server.example.com"
             resolved_cloud_user = resolved_profile.get("user") or cloud_user.strip() or "root"
             resolved_ssh_key = resolved_profile.get("key") or ssh_key_path.strip() or "~/.ssh/id_rsa"
             resolved_ssh_port = ssh_port.strip() or resolved_profile.get("port") or "22"
-            if not resolved_cloud_host.strip():
-                st.error("请填写云服务器地址：AutoDL 用户请整行粘贴控制台登录指令（ssh -p 端口 root@connect.xxx）。")
-                st.stop()
 
             # ---- 自动识别候选机：目标串优先 + 主机框多行/多台 ----
             import re as _re
