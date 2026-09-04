@@ -1,5 +1,47 @@
 # 数据集 URL 直链处理（供云端 .dep_dataset.py 通过 exec 执行，共享其命名空间）
 # 注意：本文件保持顶层可执行代码风格；使用 requested/root/load_candidate 等上游变量。
+def _safe_extract_all(archive_path, dest):
+    """逐成员安全解压：拒绝 ../、绝对路径；跳过符号/硬链接；目录先行。py3.10 兼容。"""
+    dest_root = str(dest.resolve())
+    if zipfile.is_zipfile(archive_path):
+        with zipfile.ZipFile(archive_path) as zf:
+            for member in zf.infolist():
+                name = member.filename.replace('\\', '/')
+                if name.startswith('/') or '..' in name.split('/'):
+                    continue
+                target = (dest / name).resolve()
+                if not str(target).startswith(dest_root + '/') and target != dest.resolve():
+                    continue
+                if member.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(member) as src, open(target, 'wb') as out:
+                    shutil.copyfileobj(src, out)
+    elif tarfile.is_tarfile(archive_path):
+        with tarfile.open(archive_path) as tf:
+            for member in tf.getmembers():
+                name = (member.name or '').replace('\\', '/')
+                if name.startswith('/') or '..' in name.split('/'):
+                    continue
+                target = (dest / name).resolve()
+                if not str(target).startswith(dest_root + '/') and target != dest.resolve():
+                    continue
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                if member.issym() or member.islnk():
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                fh = tf.extractfile(member)
+                if fh is None:
+                    continue
+                with fh as src, open(target, 'wb') as out:
+                    shutil.copyfileobj(src, out)
+    else:
+        raise SystemExit('不支持的压缩格式：' + str(archive_path))
+
+
 if requested.startswith(('http://', 'https://')):
     print('数据集直链下载：' + requested)
     data_home = root / 'datasets'
@@ -27,12 +69,8 @@ if requested.startswith(('http://', 'https://')):
                 raise SystemExit('数据集下载失败（网络错误）：' + requested)
             time.sleep(3)
     print('下载完成，正在解压...')
-    if zipfile.is_zipfile(archive):
-        with zipfile.ZipFile(archive) as _z:
-            _z.extractall(data_home)
-    elif tarfile.is_tarfile(archive):
-        with tarfile.open(archive) as _z:
-            _z.extractall(data_home, filter='data')
+    if zipfile.is_zipfile(archive) or tarfile.is_tarfile(archive):
+        _safe_extract_all(archive, data_home)
     else:
         archive.unlink(missing_ok=True)
         raise SystemExit('下载文件不是支持的 ZIP/TAR 包：' + str(archive))
@@ -78,7 +116,11 @@ if requested.startswith(('http://', 'https://')):
             print('未发现现成 YAML，已自动生成：' + _found + '（类别 class_0..，可自行改名）')
             break
     if _found is None:
-        raise SystemExit('解压后未找到含 images/train+val 与 labels 的目录或现成 YAML。'
-                         '（YOLO 格式要求 images/ 与 labels/ 同级）')
+        # raw 数据集兜底：非 YOLO 结构（如 CIFAR/MNIST 原始包）——导出数据根目录，
+        # 自定义训练命令以 ${PAPER_REPRO_DATA_CONFIG} 引用（--data-dir/--dataroot），成功返回。
+        _env = root / '.paper_repro_dataset.env'
+        _env.write_text('export PAPER_REPRO_DATA_CONFIG=' + json.dumps(str(data_home.resolve())) + '\n', encoding='utf-8')
+        print('[paper-repro-raw-dataset] 数据集非 YOLO 结构，已导出数据根目录到 PAPER_REPRO_DATA_CONFIG：' + str(data_home.resolve()))
+        raise SystemExit(0)
     requested = _found
     print('使用数据集配置：' + requested)

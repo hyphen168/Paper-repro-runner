@@ -130,6 +130,9 @@ def make_zip() -> Path:
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for rel, path in sorted(files):
             zf.write(path, arcname=f"{APP_NAME}/{rel}")
+        # 使用说明入包顶层（P0-3：只发 zip 也不丢引导）
+        guide = write_friend_guide()
+        zf.write(guide, arcname=f"{APP_NAME}/{guide.name}")
     return zip_path
 
 

@@ -506,12 +506,31 @@ def _render_monitor_content(task_id: str) -> None:
             st.warning("任务已请求中止：后台线程已中断并断开云端连接。")
 
         if st.button("重新执行流水线", key=f"run_{task_id}"):
-            started, run_msg = start_pipeline_execution(task_id)
-            if started:
-                st.session_state["task_log_preview"] = "流水线已在后台重新启动。"
-                st.rerun()
+            _mem_pwd = _get_exec_state().get("task_passwords", {}).get(task_id, "")
+            if not _mem_pwd:
+                # 密码只存活于进程内存（重启/换会话即丢失）：现场补输后重执行
+                st.session_state[f"rerun_need_pwd_{task_id}"] = True
+                st.warning("该任务提交时的密码仅保存在本进程内存（安全策略），当前已不可用。请补输云服务器密码后重试；后台线程随本窗口存活，勿关闭控制台。")
             else:
-                st.warning(run_msg)
+                started, run_msg = start_pipeline_execution(task_id)
+                if started:
+                    st.session_state["task_log_preview"] = "流水线已在后台重新启动。"
+                    st.rerun()
+                else:
+                    st.warning(run_msg)
+        if st.session_state.get(f"rerun_need_pwd_{task_id}"):
+            _pwd_col, _go_col = st.columns([3, 1])
+            with _pwd_col:
+                _rerun_pwd = st.text_input("云服务器密码（重执行使用，仅内存）", type="password", key=f"rerun_pwd_{task_id}")
+            with _go_col:
+                if st.button("带密码重执行", key=f"rerun_go_{task_id}", use_container_width=True):
+                    started, run_msg = start_pipeline_execution(task_id, password=_rerun_pwd)
+                    if started:
+                        st.session_state.pop(f"rerun_need_pwd_{task_id}", None)
+                        st.session_state["task_log_preview"] = "流水线已带密码重新启动。"
+                        st.rerun()
+                    else:
+                        st.warning(run_msg)
 
 def render_app() -> None:
     st.set_page_config(page_title="论文复现助手", layout="wide")
@@ -1045,29 +1064,6 @@ def render_app() -> None:
                 st.caption(f"日志存储路径: {DEFAULT_LOG_FILE}")
             else:
                 st.info("尚无后台系统日志输出。")
-
-def main() -> None:
-    script_dir = Path(__file__).resolve().parent
-    app_path = script_dir / "app.py"
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "streamlit",
-            "run",
-            str(app_path),
-            "--server.address",
-            "127.0.0.1",
-            "--server.port",
-            "8503",
-            "--server.headless",
-            "true",
-            "--browser.gatherUsageStats",
-            "false",
-        ],
-        check=False,
-    )
-
 
 if __name__ == "__main__":
     render_app()

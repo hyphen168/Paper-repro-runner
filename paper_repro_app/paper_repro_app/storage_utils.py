@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,147 @@ from paper_repro_app.project_summary import generate_project_summary
 from paper_repro_app.remote_runner import RemoteRunner
 from paper_repro_app.remote_workdir import detect_remote_workdir as detect_remote_workdir  # noqa: F401
 from paper_repro_app.report_generator import generate_repro_report
+
+
+# ================= G3 + P0-1：stdout 指标兜底与论文基准对比 =================
+_STDOUT_METRIC_PATTERNS = [
+    ("test_acc_pct", r"Accuracy of the network on the 10000 test images:\s*([\d.]+)\s*%", 1),
+    ("loss_d", r"Loss_D:\s*([\d.eE+-]+)\s+Loss_G:\s*([\d.eE+-]+)", 1),
+    ("loss_g", r"Loss_D:\s*([\d.eE+-]+)\s+Loss_G:\s*([\d.eE+-]+)", 2),
+    ("d_fake", r"D\(G\(z\)\):\s*([\d.eE+-]+)", 1),
+]
+_CLAIMS_CACHE = None
+
+
+def _load_paper_claims() -> list:
+    global _CLAIMS_CACHE
+    if _CLAIMS_CACHE is None:
+        try:
+            claims_path = Path(__file__).resolve().parent / "paper_claims.json"
+            _CLAIMS_CACHE = json.loads(claims_path.read_text(encoding="utf-8")).get("claims", [])
+        except Exception:
+            _CLAIMS_CACHE = []
+    return _CLAIMS_CACHE
+
+
+def merge_stdout_metrics(result: dict) -> dict:
+    """从回传全量日志正则兜底提取 stdout 指标（accuracy/Loss 等），并入 result metrics。"""
+    logs = str(result.get("logs") or "")
+    stdout_metrics: dict = {}
+    for name, pattern, group in _STDOUT_METRIC_PATTERNS:
+        matches = re.findall(pattern, logs)
+        if not matches:
+            continue
+        last = matches[-1]
+        try:
+            if isinstance(last, tuple):
+                stdout_metrics[name] = float(last[group - 1])
+            else:
+                stdout_metrics[name] = float(last)
+        except (TypeError, ValueError):
+            continue
+    metrics = dict(result.get("metrics") or {})
+    merged = dict(metrics)
+    for key, value in stdout_metrics.items():
+        merged.setdefault(key, value)
+    result["metrics"] = merged
+    result["stdout_metrics"] = stdout_metrics
+    if merged:
+        result["metric_verdict"] = "metrics_collected"
+    else:
+        result["metric_verdict"] = "no_metrics_output"
+    return merged
+
+
+def _match_paper_claims(text: str) -> list:
+    lowered = (text or "").lower()
+    return [entry for entry in _load_paper_claims()
+            if any(keyword.lower() in lowered for keyword in entry.get("keywords", []))]
+
+
+def _claim_repro_value(claim: dict, metrics: dict):
+    derive = claim.get("derive")
+    if derive:
+        raw = metrics.get(derive.get("from"))
+        if raw is None:
+            return None
+        try:
+            if derive.get("op") == "100-x":
+                return 100.0 - float(raw)
+        except (TypeError, ValueError):
+            return None
+        return None
+    return metrics.get(claim.get("metric_key"))
+
+
+def build_comparison_table(result: dict, task: dict) -> str:
+    """按 paper_claims.json 基准组装对比表（无基准录入时给单行说明，杜绝伪造占位行）。"""
+    metrics = merge_stdout_metrics(result)
+    blob = " ".join([
+        str(task.get("repo_url") or ""),
+        str(task.get("paper_url") or ""),
+        str(task.get("run_command") or ""),
+    ])
+    matched = _match_paper_claims(blob)
+    rows: list = []
+    for entry in matched:
+        level = entry.get("level", "L3")
+        for claim in entry.get("claims", []):
+            label = claim.get("metric_label") or claim.get("metric_key") or "指标"
+            paper_value = claim.get("paper_value")
+            rv = _claim_repro_value(claim, metrics)
+            direction = claim.get("direction", "higher")
+            unit = claim.get("unit", "")
+            paper_txt = (str(paper_value) + unit) if paper_value is not None else "执行期回填"
+            repro_txt = ""
+            if rv is not None:
+                repro_txt = f"{rv:.6g}".rstrip("0").rstrip(".")
+                if unit:
+                    repro_txt += unit
+            else:
+                repro_txt = "未发现"
+            gap_txt = "—"
+            if rv is not None and paper_value is not None:
+                try:
+                    diff = float(rv) - float(paper_value)
+                    if unit == "%":
+                        gap_txt = f"{diff:+.2f} pp"
+                    else:
+                        gap_txt = f"{diff:+.4g}"
+                except (TypeError, ValueError):
+                    gap_txt = "—"
+            note = f"口径：{entry.get('caliber') or ''}；级别 {level}"
+            if claim.get("note"):
+                note += "；" + claim["note"]
+            rows.append({
+                "metric": label,
+                "paper": paper_txt + (f"[{claim.get('source') or ''}]" if paper_value is not None else ""),
+                "repro": repro_txt,
+                "gap": gap_txt,
+                "note": note,
+            })
+    for name, value in sorted(metrics.items()):
+        if name in {"test_acc_pct", "loss_d", "loss_g", "d_fake"}:
+            continue
+        if any(name == (c.get("metric_key") or "") for entry in matched for c in entry.get("claims", [])):
+            continue
+        rows.append({
+            "metric": str(name),
+            "paper": "—",
+            "repro": f"{value:.6g}" if isinstance(value, (int, float)) else str(value),
+            "gap": "—",
+            "note": "自动收集（无论文基准录入，不参与对比）",
+        })
+    if not rows:
+        rows = [{
+            "metric": "实验指标",
+            "paper": "—",
+            "repro": "未发现",
+            "gap": "—",
+            "note": "论文基准未录入（paper_claims.json）或复现未输出指标，本次未做指标对比。",
+        }]
+    return generate_experiment_table(rows)
+
 
 def _get_exec_state() -> dict:
     # 模块级惰性状态：Streamlit rerun 重跑脚本时会覆盖顶层赋值，
@@ -91,27 +233,7 @@ def _run_pipeline_in_background(task_id: str) -> None:
         report = generate_repro_report(task, analysis)
         project_summary = generate_project_summary(task, analysis, report["report_path"])
         collected_metrics = result.get("metrics", {})
-        comparison_table = generate_experiment_table(
-            [
-                {
-                    "metric": name,
-                    "paper": "待填充",
-                    "repro": f"{value:.6g}" if isinstance(value, (int, float)) else str(value),
-                    "gap": "待论文指标",
-                    "note": "自动从 " + ", ".join(result.get("metric_sources", [])),
-                }
-                for name, value in collected_metrics.items()
-            ]
-            or [
-                {
-                    "metric": "实验指标",
-                    "paper": "待填充",
-                    "repro": "未发现",
-                    "gap": "待比较",
-                    "note": "请检查训练输出是否生成 results.csv 或 metrics.json。",
-                }
-            ]
-        )
+        comparison_table = build_comparison_table(result, task)
         result["report"] = report
         result["comparison_table"] = comparison_table
         result["project_summary"] = project_summary

@@ -6,16 +6,13 @@ from typing import Any, Dict, List
 class ExperimentComparisonTable:
     """Convert metrics/logs into a markdown comparison table for reporting and interview use."""
 
-    def __init__(self):
-        self.default_rows = [
-            {"metric": "Top-1 Acc", "paper": "N/A", "repro": "N/A", "gap": "N/A", "note": "待补充"},
-            {"metric": "mAP", "paper": "N/A", "repro": "N/A", "gap": "N/A", "note": "待补充"},
-            {"metric": "F1", "paper": "N/A", "repro": "N/A", "gap": "N/A", "note": "待补充"},
-            {"metric": "Inference speed", "paper": "N/A", "repro": "N/A", "gap": "N/A", "note": "待补充"},
-        ]
+    _NO_DATA_ROWS = [
+        {"metric": "实验指标", "paper": "—", "repro": "未收集", "gap": "—",
+         "note": "论文基准未录入（paper_claims.json）或复现未输出指标，本次未做指标对比。"},
+    ]
 
     def build_table(self, metrics: List[Dict[str, Any]] | None = None) -> str:
-        rows = metrics or self.default_rows
+        rows = metrics or self._NO_DATA_ROWS
         headers = ["指标", "论文宣称", "复现结果", "差距", "说明"]
         lines = ["| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
         for row in rows:

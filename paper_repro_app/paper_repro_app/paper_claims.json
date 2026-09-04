@@ -1,0 +1,65 @@
+{
+  "_comment": "论文基准声明（供对比表与报告使用）。paper_value 为 null 表示执行期回填（verify-on-cloud）。level: L1 全量复现 / L2 同数据减轮 / L3 样例集冒烟。direction: higher=越大越好 / lower=越小越好。",
+  "claims": [
+    {
+      "id": "resnet20_cifar10",
+      "family": "image_classification",
+      "keywords": ["resnet", "cifar", "pytorch-cifar", "pytorch_cifar"],
+      "title": "ResNet (Deep Residual Learning, He et al. 2016)",
+      "level": "L1",
+      "caliber": "CIFAR-10（训练 50k/测试 10k）；复现口径：200 epochs（论文表注 164 epochs，差轮见报告口径节）",
+      "claims": [
+        {
+          "metric_label": "测试误差 (%)",
+          "metric_key": "test_error_pct",
+          "derive": {"from": "test_acc_pct", "op": "100-x"},
+          "paper_value": 8.75,
+          "unit": "%",
+          "direction": "lower",
+          "source": "He et al. 2016 (arXiv:1512.03385) Table 2, ResNet-20, CIFAR-10",
+          "note": "论文 v1 表值 8.75%（20-layer）；更浅层不可比，56-layer 6.97% 仅背景"
+        }
+      ]
+    },
+    {
+      "id": "yolov5_coco128",
+      "family": "object_detection",
+      "keywords": ["yolov5", "ultralytics/yolov5", "coco128"],
+      "title": "YOLOv5 (Jocher et al., ultralytics/yolov5)",
+      "level": "L3",
+      "caliber": "coco128 演示集（128 张）；与论文 COCO val2017 全量口径不可直接对比，仅结构判据 + 官方 tutorial 同配置参照",
+      "claims": [
+        {
+          "metric_label": "mAP@0.5 (coco128 3-epoch)",
+          "metric_key": "metrics/mAP_0.5",
+          "derive": null,
+          "paper_value": 0.287,
+          "unit": "",
+          "direction": "higher",
+          "source": "ultralytics/yolov5 官方 Tutorial（coco128, 3 epochs；commit 执行期回填）",
+          "note": "verify-on-cloud：执行期抓取 README/tutorial 留存出处后回填 commit"
+        }
+      ]
+    },
+    {
+      "id": "mnist_cnn",
+      "family": "image_classification",
+      "keywords": ["mnist", "pytorch/examples"],
+      "title": "MNIST CNN（pytorch/examples 官方 mnist 示例）",
+      "level": "L3",
+      "caliber": "MNIST 60k/10k；14 epochs；示例实现与 LeNet-5 非同构，LeCun 表值仅背景",
+      "claims": [
+        {
+          "metric_label": "测试准确率 (%)",
+          "metric_key": "test_acc_pct",
+          "derive": null,
+          "paper_value": 99.0,
+          "unit": "%",
+          "direction": "higher",
+          "source": "pytorch/examples mnist README（约 99%；commit 执行期回填）",
+          "note": "LeCun et al. 1998 原 LeNet-5 0.95% 误差为背景注记，不作对比宣称"
+        }
+      ]
+    }
+  ]
+}

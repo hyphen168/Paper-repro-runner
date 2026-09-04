@@ -51,7 +51,7 @@
 
 ## 3. 技术栈
 
-- Python 3.10+
+- Python 3.11+
 - Streamlit：本地轻量交互界面
 - SQLite：本地任务管理
 - Paramiko：SSH 远程执行

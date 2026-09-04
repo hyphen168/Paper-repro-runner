@@ -7,7 +7,7 @@ name = "paper-repro-runner"
 version = "0.2.0"
 description = "Lightweight paper reproduction automation app with local control and remote cloud execution."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Copilot" }]
 dependencies = [
