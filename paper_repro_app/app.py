@@ -766,46 +766,40 @@ def _render_monitor_content(task_id: str) -> None:
                 st.warning(f"任务已结束（状态：{status}）。")
             with st.expander("查看完整执行结果 (JSON)", expanded=False):
                 st.json(result if isinstance(result, dict) else {"raw": str(result)[:4000]})
-        # 执行中（queued/running）：有实时滚动日志面板 + 步进器即可，不再叠加提示
-        if st.session_state.get(f"cfm_cancel_{task_id}") and st.button("确认结束该任务（云端执行将中断）", key=f"cfm_go_{task_id}", type="primary"):
-            st.session_state.pop(f"cfm_cancel_{task_id}", None)
-            store.update_task_status(task_id, "cancelled", "正在中止任务：已通知后台中断云端执行...", current_step="cancelled")
-            cancel_task(task_id)
-            st.warning("任务已请求中止：后台线程已中断并断开云端连接。")
-        elif st.button("结束当前任务", key=f"cancel_{task_id}"):
-            st.session_state[f"cfm_cancel_{task_id}"] = True
-            st.rerun()
-
-        if st.session_state.get(f"cfm_run_{task_id}") and st.button("确认重新执行（将再次产生云计费）", key=f"cfm_run_go_{task_id}", type="primary"):
-            st.session_state.pop(f"cfm_run_{task_id}", None)
-            _mem_pwd = _get_exec_state().get("task_passwords", {}).get(task_id, "")
-            if not _mem_pwd:
-                # 密码只存活于进程内存（重启/换会话即丢失）：现场补输后重执行
-                st.session_state[f"rerun_need_pwd_{task_id}"] = True
-                st.warning("该任务提交时的密码仅保存在本进程内存（安全策略），当前已不可用。请补输云服务器密码后重试；后台线程随本窗口存活，勿关闭控制台。")
-            else:
-                started, run_msg = start_pipeline_execution(task_id)
-                if started:
-                    st.session_state["task_log_preview"] = "流水线已在后台重新启动。"
-                    st.rerun()
-                else:
-                    st.warning(run_msg)
-        elif st.button("重新执行流水线", key=f"run_{task_id}"):
-            st.session_state[f"cfm_run_{task_id}"] = True
-            st.rerun()
-        if st.session_state.get(f"rerun_need_pwd_{task_id}"):
-            _pwd_col, _go_col = st.columns([3, 1])
-            with _pwd_col:
-                _rerun_pwd = st.text_input("云服务器密码（重执行使用，仅内存）", type="password", key=f"rerun_pwd_{task_id}")
-            with _go_col:
-                if st.button("带密码重执行", key=f"rerun_go_{task_id}", use_container_width=True):
-                    started, run_msg = start_pipeline_execution(task_id, password=_rerun_pwd)
-                    if started:
-                        st.session_state.pop(f"rerun_need_pwd_{task_id}", None)
-                        st.session_state["task_log_preview"] = "流水线已带密码重新启动。"
+                # ===== 操作区：按状态只给一个动作，popover 内二次确认（无布局跳变） =====
+        _is_active = status in {"queued", "running"}
+        _op_1, _op_2 = st.columns([1, 3])
+        with _op_1:
+            _action_name = "结束当前任务" if _is_active else "重新执行流水线"
+            with st.popover(_action_name, key=f"op_{task_id}"):
+                if _is_active:
+                    st.caption("云端命令将被中断，任务标记为「已结束」。确认后不可恢复。")
+                    if st.button("确认结束任务（云端将中断）", type="primary", key=f"op_cancel_go_{task_id}", use_container_width=True):
+                        store.update_task_status(task_id, "cancelled", "正在中止任务：已通知后台中断云端执行...", current_step="cancelled")
+                        cancel_task(task_id)
                         st.rerun()
-                    else:
-                        st.warning(run_msg)
+                else:
+                    st.caption("按原配置重新跑完整流水线（会再次产生云端计费）。")
+                    _mem_pwd = str(_get_exec_state().get("task_passwords", {}).get(task_id, "") or "")
+                    _need_pwd = not bool(_mem_pwd)
+                    if _need_pwd:
+                        _rerun_pwd = st.text_input("云服务器密码（仅本进程内存）", type="password", key=f"op_pwd_{task_id}")
+                    if st.button("确认重新执行", type="primary", key=f"op_run_go_{task_id}", use_container_width=True):
+                        if _need_pwd and not (_rerun_pwd or "").strip():
+                            st.warning("请先填写云服务器密码（换会话后需补输一次）。")
+                        else:
+                            _started, _run_msg = start_pipeline_execution(
+                                task_id, password=(_rerun_pwd or "").strip() if _need_pwd else _mem_pwd)
+                            if _started:
+                                st.session_state["task_log_preview"] = "流水线已在后台重新启动。"
+                                st.rerun()
+                            else:
+                                st.warning(_run_msg)
+        with _op_2:
+            if _is_active:
+                st.caption("提示：队列/执行中可「结束当前任务」；批量任务会继续后续排队项。")
+            else:
+                st.caption("任务已结束：可重新执行整条流水线，或在下方展开卡查看完整结果。")
 
 def _access_gate() -> bool:
     """远程访问口令门 + 受信设备令牌：expose=lan/tunnel 时启用；桌面本机模式直通。"""
@@ -980,10 +974,7 @@ def render_app() -> None:
     saved = config_store.load()
 
     with st.sidebar:
-        # ===== A 云服务器与任务 =====
-        st.markdown("##### 云服务器与任务")
-        st.caption("云端只执行，产物留在本机。")
-        st.caption(f"配置目录：{config_store.config_dir}")
+        # ===== 侧栏收纳：AI / 远程 / 当地外观 / 帮助（详细设置折叠） =====
 
 
         # ===== B 智能助手 =====
@@ -1047,7 +1038,7 @@ def render_app() -> None:
         # ===== C 手机与远程（常驻：桌面=开启指引；远程=地址+受信管理） =====
         _expose_mode = os.environ.get("PAPER_REPRO_EXPOSE", "")
         if "sb_remote_open" not in st.session_state:
-            st.session_state["sb_remote_open"] = not _expose_mode
+            st.session_state["sb_remote_open"] = bool(_expose_mode)  # 桌面默认折叠；远程模式默认展开
         _remote_badge = ("● 桌面本机 · 未开启远程" if not _expose_mode
                          else ("● 局域网模式已启用" if _expose_mode == "lan" else "● 反隧模式已启用"))
         st.markdown(f"**手机与远程** <span style='color:{'var(--text-muted)' if not _expose_mode else 'var(--green)'};font-size:0.72rem;font-weight:400;'>{_remote_badge}</span>", unsafe_allow_html=True)
@@ -1092,69 +1083,66 @@ def render_app() -> None:
                     gate_revoke_all()
                     st.rerun()
         st.markdown("---")
-        st.markdown("##### 当地定位与天气")
-        from paper_repro_app.weather_fx import (
-            WEATHER_PREVIEWS, clear_manual_city, get_manual_city, set_manual_city,
-        )
-        _manual_city = get_manual_city()
-        st.caption("当地时刻/天气/昼夜都按你设置或定位到的地点计算。")
-        if _manual_city:
-            st.caption(f"✅ 当前当地：{_manual_city}（手动/GPS 设定，优先于 IP）")
-        else:
-            st.caption("⚠️ 当前用 IP 自动定位——IP 归属解析的是宽带出口城市（常显示为 北京 等），"
-                       "不是你的物理位置。请在下方输入你的城市（如 贵阳）后点「设为当地」，"
-                       "或点「浏览器定位」用 GPS 精确校准。")
-        _city_input = st.text_input(
-            "所在城市（天气/昼夜/明暗氛围按此计算；留空则 IP 自动）",
-            value=_manual_city or "",
-            placeholder="例如：贵阳 / 北京 / 上海 / Chengdu",
-            key="city_input",
-            label_visibility="collapsed",
-        )
-        _c1, _c2, _c3 = st.columns(3)
-        with _c1:
-            if st.button("设为当地", key="city_save", use_container_width=True, help="把上面输入的城市（如贵阳）设为当地"):
-                _ok, _msg = set_manual_city(_city_input)
-                if _ok:
-                    st.session_state["wx_preview"] = "auto"
+        with st.expander("当地天气 · 昼夜 · 背景预览", expanded=False):
+            st.caption("当地时刻 / 天气 / 昼夜都按你设置或定位到的地点计算。")
+            from paper_repro_app.weather_fx import (
+                WEATHER_PREVIEWS, clear_manual_city, get_manual_city, set_manual_city,
+            )
+            _manual_city = get_manual_city()
+            if _manual_city:
+                st.caption(f"✅ 当地：{_manual_city}（手动/GPS 设定，优先于 IP）")
+            else:
+                st.caption("⚠️ IP 自动定位解析的是宽带出口城市（可能显示 北京 等），不是你的物理位置。"
+                           "可输入你的城市（如 贵阳）后点「设为当地」，或点「浏览器定位」用 GPS 精确校准。")
+            _city_input = st.text_input(
+                "所在城市（留空则 IP 自动）",
+                value=_manual_city or "",
+                placeholder="例如：贵阳 / 北京 / 上海 / Chengdu",
+                key="city_input",
+                label_visibility="collapsed",
+            )
+            _c1, _c2, _c3 = st.columns(3)
+            with _c1:
+                if st.button("设为当地", key="city_save", use_container_width=True, help="把输入的城市（如贵阳）设为当地"):
+                    _ok, _msg = set_manual_city(_city_input)
+                    if _ok:
+                        st.session_state["wx_preview"] = "auto"
+                        st.rerun()
+                    else:
+                        st.warning(_msg)
+            with _c2:
+                if st.button("浏览器定位", key="city_geo", use_container_width=True,
+                             help="用浏览器 GPS/WiFi 定位所在城市（比 IP 准确），首次需授权"):
+                    st.session_state["geo_force"] = True
+                    try:
+                        st.query_params["geoask"] = "1"
+                    except Exception:
+                        pass
                     st.rerun()
-                else:
-                    st.warning(_msg)
-        with _c2:
-            if st.button("浏览器定位", key="city_geo", use_container_width=True,
-                         help="用浏览器 GPS/WiFi 定位你所在城市（比 IP 准确），首次会请求浏览器授权"):
-                st.session_state["geo_force"] = True
-                try:
-                    st.query_params["geoask"] = "1"
-                except Exception:
-                    pass
-                st.rerun()
-        with _c3:
-            if st.button("IP 自动", key="city_auto", use_container_width=True):
-                clear_manual_city()
-                st.session_state["wx_preview"] = "auto"
-                try:
-                    del st.query_params["geoask"]
-                except Exception:
-                    pass
-                st.rerun()
+            with _c3:
+                if st.button("IP 自动", key="city_auto", use_container_width=True):
+                    clear_manual_city()
+                    st.session_state["wx_preview"] = "auto"
+                    try:
+                        del st.query_params["geoask"]
+                    except Exception:
+                        pass
+                    st.rerun()
+            st.markdown("**背景天气预览**：")
+            _wx_opts = list(WEATHER_PREVIEWS.keys())
+            _wx_default = st.session_state.get("wx_preview", "auto")
+            if _wx_default not in _wx_opts:
+                _wx_default = "auto"
+            st.selectbox(
+                "天气氛围（默认自动跟随当地天气，可手动预览）",
+                _wx_opts,
+                index=_wx_opts.index(_wx_default),
+                format_func=lambda k: WEATHER_PREVIEWS[k][2],
+                key="wx_preview",
+                label_visibility="collapsed",
+            )
 
-        st.markdown("##### 背景天气预览")
-        from paper_repro_app.weather_fx import WEATHER_PREVIEWS
-        _wx_opts = list(WEATHER_PREVIEWS.keys())
-        _wx_default = st.session_state.get("wx_preview", "auto")
-        if _wx_default not in _wx_opts:
-            _wx_default = "auto"
-        st.selectbox(
-            "天气氛围（默认自动跟随当地天气，可手动预览）",
-            _wx_opts,
-            index=_wx_opts.index(_wx_default),
-            format_func=lambda k: WEATHER_PREVIEWS[k][2],
-            key="wx_preview",
-            label_visibility="collapsed",
-        )
-
-        # ===== E 帮助与手册 =====
+# ===== E 帮助与手册 =====
         with st.expander("遇到问题？先看这里", expanded=False):
             st.markdown(
                 """- **连不上服务器**：实例要开机；把控制台整行登录指令（ssh -p 端口 root@connect.xxx）粘到服务器地址框，点「测试 SSH 连接」
@@ -1167,6 +1155,8 @@ def render_app() -> None:
 - **数据在哪**：本机数据在用户目录 .paper_repro_app 与应用数据目录，应用文件夹可随时删除重装
 - 详细手册见应用目录 docs/troubleshoot/GUIDE.md"""
             )
+            st.caption(f"配置目录：{config_store.config_dir}（任务库/日志/本地产物均在本机用户目录）")
+
 
     storage_state_key = "selected_local_data_dir"
     storage_default = st.session_state.get(storage_state_key) or saved.get("local_data_dir", str(Path.home() / "paper_repro_data"))
@@ -1314,8 +1304,6 @@ def render_app() -> None:
                 _tune_render_panel()
 
         # ============ 卡片 3：微调参数面板（tune 模式） ============
-        st.markdown("---")
-        submitted = st.button("提交复现任务", type="primary", use_container_width=True)
 
         # ---------- 微调/高级参数处理 ----------
         if run_mode == "tune":
@@ -1531,6 +1519,10 @@ def render_app() -> None:
                             st.warning(f"{len(unresolved)} 篇未能自动识别代码仓库：" + "；".join(unresolved[:4])
                                        + ("…" if len(unresolved) > 4 else "") + "。可改为直接粘贴仓库地址重试。")
                         st.rerun()
+
+        st.markdown("---")
+        st.caption("确认上方「论文/仓库 → 云服务器 → 运行方式 → 高级选项」全部无误后提交，提交即开始云端执行。")
+        submitted = st.button("提交复现任务", type="primary", use_container_width=True)
 
         if submitted:
             auto_run = run_mode in {"auto", "tune"}

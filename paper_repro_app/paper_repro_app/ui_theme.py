@@ -622,6 +622,36 @@ code { background: rgba(0, 240, 255, 0.1); color: var(--cyan); border-radius: 4p
 }
 .ssh-health.ok { color: #a9f5d0; border-color: rgba(0, 255, 163, 0.35); background: rgba(0, 255, 163, 0.06); }
 .ssh-health.fail { color: #ffb3c0; border-color: rgba(255, 43, 74, 0.4); background: rgba(255, 43, 74, 0.07); }
+
+/* ===== stepper 连线修正（v2.2.1）：每根连线 = 上一节点中心 → 本节点中心 ===== */
+.fx-stepper { padding: 0.5rem 0 0.2rem; }
+.fx-step .bar { left: -50%; width: 100%; top: 16px; }
+.fx-step.done .bar::after,
+.fx-step.active .bar::after,
+.fx-step.error .bar::after { transform: scaleX(1); }
+
+/* ===== 侧栏整理（更紧凑、少一层噪点） ===== */
+[data-testid="stSidebar"] .block-container { padding-top: 0.9rem; padding-bottom: 2rem; }
+[data-testid="stSidebar"] h5 { font-size: 0.78rem; margin: 0.9rem 0 0.3rem; letter-spacing: 0.08em; }
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] { margin-bottom: 0.15rem; }
+[data-testid="stSidebar"] hr { margin: 0.6rem 0; border-color: rgba(255, 255, 255, 0.05); }
+[data-testid="stSidebar"] [data-testid="stExpander"] details { background: rgba(9, 13, 26, 0.42); border-color: rgba(255, 255, 255, 0.09); }
+[data-testid="stSidebar"] [data-testid="stExpander"] details + details { margin-top: 8px; }
+[data-testid="stSidebar"] .stButton > button,
+[data-testid="stSidebar"] div[data-testid="stFormSubmitButton"] button { min-height: 32px; font-size: 12px; padding: 0 8px; }
+[data-testid="stSidebar"] [data-testid="stTextInput"] input { font-size: 13px; }
+
+/* ===== Popover 弹层主题化（与玻璃卡片一致） ===== */
+[data-testid="stPopoverBody"],
+[data-testid="stPopover"] [data-testid="stVerticalBlock"] > div { border-radius: 14px; }
+[data-testid="stPopoverBody"] {
+    background: rgba(16, 22, 38, 0.98);
+    border: 1px solid rgba(0, 240, 255, 0.28);
+    box-shadow: var(--shadow-glass-md);
+    color: var(--text-primary);
+}
+[data-testid="stPopoverBody"] p, [data-testid="stPopoverBody"] span { color: var(--text-secondary); }
+[data-testid="stPopoverBody"] button { min-height: 34px; }
 </style>
 """
 
