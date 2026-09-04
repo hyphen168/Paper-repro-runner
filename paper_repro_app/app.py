@@ -82,16 +82,68 @@ if _migrated_files:
 
 
 
+_PS_FOLDER_PICKER = r'''
+$ErrorActionPreference = 'SilentlyContinue'
+Add-Type -AssemblyName System.Windows.Forms
+$f = New-Object System.Windows.Forms.FolderBrowserDialog
+$f.Description = '选择本地输出目录（任务产物/日志/报告保存位置）'
+$f.ShowNewFolderButton = $true
+$def = $env:PR_PICK_DIR
+if ($def) { try { $f.SelectedPath = $def } catch {} }
+$res = $f.ShowDialog()
+if ($res -eq [System.Windows.Forms.DialogResult]::OK) {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    [Console]::WriteLine($f.SelectedPath)
+}
+'''
+
+
+def _enable_dpi_awareness() -> None:
+    """让原生对话框按系统 DPI 渲染（修复模糊/像素低）。仅 Windows 有效，失败静默。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)  # system DPI aware
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
 def open_directory_dialog(default_path: str) -> str:
+    """选择本地输出目录：优先 PowerShell 原生目录选择器（现代、清晰、支持新建文件夹），
+    失败回退 tkinter（先置 DPI 感知防模糊）。取消或不可用时返回默认路径。"""
     base_dir = default_path or str(Path.home() / "paper_repro_data")
-    if Tk is None or askdirectory is None:
-        return base_dir
-    root = Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    selected = askdirectory(initialdir=base_dir, title="选择本地存储目录")
-    root.destroy()
-    return selected or base_dir
+    # —— 首选：PowerShell FolderBrowserDialog（独立进程，主 UI 不卡顿无残留窗口） ——
+    try:
+        env = dict(os.environ)
+        env["PR_PICK_DIR"] = base_dir
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-STA", "-Command", _PS_FOLDER_PICKER],
+            capture_output=True, env=env, timeout=180,
+        )
+        out = proc.stdout.decode("utf-8", errors="replace").strip().splitlines()
+        picked = "".join(line.strip() for line in out if line.strip())
+        if picked and os.path.isdir(picked):
+            return os.path.abspath(picked)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    # —— 回退：tkinter（置 DPI 感知） ——
+    if Tk is not None and askdirectory is not None:
+        _enable_dpi_awareness()
+        try:
+            root = Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            selected = askdirectory(initialdir=base_dir, title="选择本地输出目录")
+            root.destroy()
+            if selected:
+                return os.path.abspath(selected)
+        except Exception:
+            pass
+    return base_dir
 
 
 # —— 失败映射：关键词 -> (错误码, 结论, 动作, 手册锚点)（排障规范 v1.0 三段式）——
@@ -1162,6 +1214,8 @@ def render_app() -> None:
     storage_default = st.session_state.get(storage_state_key) or saved.get("local_data_dir", str(Path.home() / "paper_repro_data"))
     if storage_state_key not in st.session_state:
         st.session_state[storage_state_key] = storage_default
+    if "local_data_dir_input" not in st.session_state:
+        st.session_state["local_data_dir_input"] = storage_default
 
     tab_submit, tab_monitor, tab_history, tab_batch = st.tabs(["提交任务", "任务监控", "历史记录", "批量任务"])
     with tab_submit:
@@ -1175,11 +1229,16 @@ def render_app() -> None:
                     label_visibility="collapsed",
                 )
                 st.session_state[storage_state_key] = local_data_dir
+                if local_data_dir.strip() and os.path.abspath(local_data_dir.strip()) != os.path.abspath(str(Path.home() / "paper_repro_data")):
+                    st.caption(f"📁 产物将保存在：{os.path.abspath(local_data_dir.strip())}")
             with action_col:
-                if st.button("选择目录", key="choose_local_storage", use_container_width=True):
+                if st.button("选择目录…", key="choose_local_storage", use_container_width=True, help="打开系统目录选择器（PowerShell 原生窗口，支持新建文件夹）"):
                     selected = open_directory_dialog(st.session_state.get(storage_state_key, storage_default))
                     if selected:
+                        # 同时更新输入框自身 key：否则 Streamlit 控件状态不会回显新路径
+                        st.session_state["local_data_dir_input"] = selected
                         st.session_state[storage_state_key] = selected
+                        st.toast("本地输出目录已设为：" + selected)
                         st.rerun()
 
         # ============ 卡片 1：论文与云端（必填） ============
