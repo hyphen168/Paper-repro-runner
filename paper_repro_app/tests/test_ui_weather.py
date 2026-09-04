@@ -56,7 +56,8 @@ def test_fresh_theme_css():
     # 专家组规范：轮询区零重放动画 —— 步进节点用静态光晕，不再有 infinite 动画
     assert "@keyframes nodePulse" not in APP_CSS and "@keyframes badgePulse" not in APP_CSS
     assert "animation: nodePulse" not in APP_CSS, "轮询区禁止重放动画"
-    assert "rgba(255, 206, 0, 0.12), 0 0 18px" in APP_CSS or "0 0 0 5px rgba(255, 206, 0, 0.12)" in APP_CSS, "静态光环缺失"
+    # 步进器当前节点的静态光环（Obsidian×Ember 琥珀系）
+    assert "0 0 0 5px rgba(255,180,84,.12)" in APP_CSS or "rgba(255, 206, 0, 0.12), 0 0 18px" in APP_CSS, "静态光环缺失"
     assert "var(--amb-card" in APP_CSS, "氛围变量消费缺失"
     assert "z-index: 1" in APP_CSS, "内容层分离缺失"
     # 内容层在粒子之上的排版保障

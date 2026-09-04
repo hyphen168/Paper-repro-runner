@@ -397,10 +397,10 @@ _AMB_KIND = {  # 玻璃 α 天气增量（夜档锚 = 0.50 + 增量）
     "clear": 0.00, "partly": 0.02, "cloudy": 0.04, "fog": 0.06,
     "snow": 0.08, "rain": 0.14, "heavy_rain": 0.16, "storm": 0.20,
 }
-_TXT2_BRIGHT = "#a9bcdb"
-_TXT2_DIM = "#8fa3c7"
-_TXT3_BRIGHT = "#8b9fbe"
-_TXT3_DIM = "#5c6f96"
+_TXT2_BRIGHT = "#d8cfbd"
+_TXT2_DIM = "#b5a992"
+_TXT3_BRIGHT = "#a89d8c"
+_TXT3_DIM = "#7a7060"
 
 
 def ambient_vars(v: dict, kind: str = "") -> dict:
@@ -413,8 +413,8 @@ def ambient_vars(v: dict, kind: str = "") -> dict:
     v["amb_line"] = clamp(0.10 * v.get("glow_c", 0.85), 0.05, 0.12)
     v["amb_hi"] = clamp(0.05 * (1.6 - df), 0.03, 0.08)
     v["amb_glow"] = clamp(v.get("glow_c", 1.0), 0.3, 1.0)
-    v["amb_acc"] = "#7ce8ee" if d else "#00f0ff"   # 白昼 accent 提亮降饱和，防暗底高饱和刺眼
-    v["amb_mag"] = "#ff9ab8" if d else "#ff2a6d"
+    v["amb_acc"] = "#ffc069" if d else "#ffb454"   # 强调统一为暖琥珀（Obsidian×Ember）
+    v["amb_mag"] = "#d9a05a" if d else "#c8863a"
     v["txt2"] = _TXT2_BRIGHT if d else _TXT2_DIM
     v["txt3"] = _TXT3_BRIGHT if d else _TXT3_DIM
     v["scan_a"] = 0.006 if d else 0.011

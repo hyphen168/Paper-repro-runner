@@ -48,16 +48,16 @@ def get_step_order() -> list[str]:
 
 
 def get_status_color(status: str) -> str:
-    """任务状态 → 霓虹色（赛博主题）。"""
+    """任务状态 → 暖调语义色（Obsidian×Ember 主题：琥珀为主，语义色降饱和兼容）。"""
     palette = {
-        "queued": "#ffce00",
-        "running": "#00f0ff",
-        "success": "#00ffa3",
-        "failed": "#ff2b4a",
-        "cancelled": "#5c6f96",
-        "unknown": "#8fa3c7",
+        "queued": "#e8b45c",
+        "running": "#ffb454",
+        "success": "#8fd0a8",
+        "failed": "#e0674f",
+        "cancelled": "#7a7060",
+        "unknown": "#a89d8c",
     }
-    return palette.get(str(status).lower(), "#8fa3c7")
+    return palette.get(str(status).lower(), "#a89d8c")
 
 
 def get_local_ips() -> list[str]:
