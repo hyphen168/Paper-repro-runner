@@ -96,18 +96,16 @@ body::before {
     content: "";
     position: fixed; inset: 0; z-index: 0; pointer-events: none;
     background-image:
-        linear-gradient(rgba(0, 240, 255, 0.028) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(0, 240, 255, 0.028) 1px, transparent 1px);
+        linear-gradient(rgba(0, 240, 255, 0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0, 240, 255, 0.02) 1px, transparent 1px);
     background-size: 44px 44px;
-    -webkit-mask-image: radial-gradient(120% 95% at 50% 0%, #000 28%, transparent 80%);
-    mask-image: radial-gradient(120% 95% at 50% 0%, #000 28%, transparent 80%);
+    background-position: 0 0, 0 0;
 }
 body::after {
     content: "";
     position: fixed; inset: 0; z-index: 1; pointer-events: none;
-    background: repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.01) 0 1px, transparent 1px 3px);
-    mix-blend-mode: overlay;
-    opacity: 0.7;
+    background: repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.014) 0 1px, transparent 1px 3px);
+    opacity: 0.8;
 }
 .stApp { background: transparent; color: var(--text-primary); }
 .stApp > div, .stSidebar > div { background: transparent; }

@@ -189,10 +189,12 @@ _WEATHER_JS = """<script>
   var CFG = __CFG__;
   var kind = CFG.kind || 'calm', day = !!CFG.day, wind = (CFG.wind || 0) * 0.5;
 
-  var W = 0, H = 0, DPR = 1, resizeT = 0;
+  var W = 0, H = 0, DPR = 1, resizeT = 0, skip = 1, _skipCount = 0, _raf = 0;
   function doResize() {
     W = P.innerWidth; H = P.innerHeight;
-    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    var want = Math.min(window.devicePixelRatio || 1, 2);
+    var cap = Math.sqrt(3900000 / Math.max(W * H, 1));
+    DPR = Math.max(0.7, Math.min(want, cap));
     canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     buildStatic();
@@ -278,7 +280,7 @@ _WEATHER_JS = """<script>
   }
 
   /* ============ 星空（预生成固定种子 + 相位分组） ============ */
-  var stars = null;
+  var stars = null, starTex = null, starDyn = null;
   function buildStars() {
     stars = [];
     var n = Math.min(420, Math.round(W * H / 5000));
@@ -288,21 +290,34 @@ _WEATHER_JS = """<script>
       stars.push({ x: rnd(0, W), y: rnd(0, H * 0.85), r: bright > 0.7 ? rnd(0.9, 1.6) : rnd(0.4, 1),
                    base: bright, ph: rnd(0, 2), grp: (i % 4) * 1.5708, sp: rnd(0.5, 2.5) });
     }
-  }
-  function drawStars(t, dt) {
+    // 静态星层离屏纹理（P1-5）：每帧 1 次 blit 替代数百次 fillRect
+    starTex = off(Math.ceil(W), Math.ceil(H * 0.9));
+    var g = starTex.getContext('2d');
     for (i = 0; i < stars.length; i++) {
       var s = stars[i];
+      if (s.base > 0.85) continue;   // 亮星进动态层（闪烁+十字光芒）
+      var mid = s.base * 0.72;
+      g.fillStyle = 'rgba(225,235,255,' + mid + ')';
+      g.fillRect(s.x, s.y, s.r, s.r);
+    }
+    starDyn = [];
+    for (i = 0; i < stars.length; i++) {
+      if (stars[i].base > 0.85) starDyn.push(stars[i]);
+    }
+  }
+  function drawStars(t, dt) {
+    ctx.drawImage(starTex, 0, 0, starTex.width, starTex.height);
+    for (i = 0; i < starDyn.length; i++) {
+      var s = starDyn[i];
       var a = s.base * (0.55 + 0.45 * Math.sin(s.grp + t * 0.001 * s.sp + s.ph));
       ctx.fillStyle = 'rgba(225,235,255,' + a + ')';
       ctx.fillRect(s.x, s.y, s.r, s.r);
-      if (s.base > 0.9) {
-        ctx.strokeStyle = 'rgba(220,235,255,' + (a * 0.5) + ')';
-        ctx.lineWidth = 0.6;
-        ctx.beginPath();
-        ctx.moveTo(s.x - s.r * 3, s.y); ctx.lineTo(s.x + s.r * 3, s.y);
-        ctx.moveTo(s.x, s.y - s.r * 3); ctx.lineTo(s.x, s.y + s.r * 3);
-        ctx.stroke();
-      }
+      ctx.strokeStyle = 'rgba(220,235,255,' + (a * 0.5) + ')';
+      ctx.lineWidth = 0.6;
+      ctx.beginPath();
+      ctx.moveTo(s.x - s.r * 3, s.y); ctx.lineTo(s.x + s.r * 3, s.y);
+      ctx.moveTo(s.x, s.y - s.r * 3); ctx.lineTo(s.x, s.y + s.r * 3);
+      ctx.stroke();
     }
   }
 
@@ -515,17 +530,18 @@ _WEATHER_JS = """<script>
       var al = Math.min(1, b.life * 2);
       ctx.save();
       ctx.lineJoin = 'round';
-      ctx.shadowColor = 'rgba(150,180,255,0.9)'; ctx.shadowBlur = 16;
-      ctx.strokeStyle = 'rgba(200,214,255,' + al + ')';
-      ctx.lineWidth = 2.6;
+      ctx.strokeStyle = 'rgba(150, 180, 255,' + (al * 0.16) + ')';
+      ctx.lineWidth = 8;
       ctx.beginPath(); ctx.moveTo(b.pts[0][0], b.pts[0][1]);
       for (j = 1; j < b.pts.length; j++) ctx.lineTo(b.pts[j][0], b.pts[j][1]);
       ctx.stroke();
-      ctx.shadowBlur = 0;
+      ctx.strokeStyle = 'rgba(200, 214, 255,' + al + ')';
+      ctx.lineWidth = 2.6;
+      ctx.stroke();
       ctx.strokeStyle = 'rgba(255,255,255,' + al + ')';
       ctx.lineWidth = 1;
       ctx.stroke();
-      ctx.restore();
+      ctx.restore();;
     }
   }
 
@@ -549,6 +565,8 @@ _WEATHER_JS = """<script>
   /* ============ 主循环 ============ */
   var last = performance.now();
   function tick(now) {
+    if (_skipCount % skip !== 0) { _skipCount++; _raf = requestAnimationFrame(_loop); return; }
+    _skipCount++;
     var dtRaw = (now - last) / 16.667;
     last = now;
     var dt = Math.min(Math.max(dtRaw, 0), 3);
@@ -575,11 +593,17 @@ _WEATHER_JS = """<script>
     if (frameMS.length > 120) {
       var avg = frameMS.reduce(function (a, b) { return a + b; }, 0) / frameMS.length;
       frameMS.length = 0;
-      if (avg > 22 && scale > 0.4) scale *= 0.75;
+      if (avg > 20 && skip < 3) skip += 1;
+      else if (avg < 11 && skip > 1) skip -= 1;
     }
-    requestAnimationFrame(tick);
+    _raf = requestAnimationFrame(_loop);
   }
-  requestAnimationFrame(tick);
+  function _loop(now) { tick(now); }
+  P.document.addEventListener('visibilitychange', function () {
+    if (P.document.hidden || document.hidden) { cancelAnimationFrame(_raf); }
+    else { last = performance.now(); _raf = requestAnimationFrame(_loop); }
+  });
+  _raf = requestAnimationFrame(_loop);
 })();
 </script>
 """

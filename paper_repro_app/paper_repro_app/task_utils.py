@@ -17,6 +17,8 @@ def format_log_preview(raw_log: str | None, max_entries: int = 3) -> str:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     formatted = []
     for line in lines:
+        if len(line) > 120:  # P0-3：长行截断，控制 2s 轮询 payload 体积
+            line = line[:120] + "..."
         if re.match(r"^\[\d{2}:\d{2}:\d{2}\]", line):
             formatted.append(line)
         else:
