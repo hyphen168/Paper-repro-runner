@@ -57,20 +57,8 @@ APP_CSS = """
     --shadow-glass-md: 0 2px 8px rgba(0, 0, 0, 0.24), 0 14px 34px rgba(0, 0, 0, 0.34);
     --glow-cyan-sm: 0 0 12px rgba(0, 240, 255, 0.22);
     --glow-magenta-sm: 0 0 12px rgba(255, 42, 109, 0.24);
-    /* 昼夜系统（day_night.py 每 60s 注入；默认深宵基准） */
-    --day-factor: 0.0;
-    --sky-top: #03050D;
-    --sky-mid: #070C1D;
-    --sky-hor: #0D1530;
-    --sun-a: 0.0;
-    --moon-a: 1.0;
-    --star-alpha: 1.0;
-    --glow-c: 0.85;
-    --glow-m: 1.0;
-    --glow-y: 0.4;
-    --card-alpha: 0.5;
-    --card-bright: 0%;
-    --particle-bright: 0.55;
+    /* 背景亮度（按天气×昼夜 每 60s 注入单变量；固定底色由它在深/浅间插值） */
+    --bg-color: #0A1120;
     /* 字体 */
     --font-display: "Bahnschrift", "Rajdhani", "Segoe UI", "Microsoft YaHei", sans-serif;
     --font-body: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
@@ -79,12 +67,13 @@ APP_CSS = """
 
 html, body { height: 100%; }
 body {
-    background:
-        radial-gradient(1200px 700px at 10% -8%, rgba(0, 240, 255, calc(0.12 * var(--glow-c))), transparent 60%),
-        radial-gradient(1000px 620px at 90% 4%, rgba(255, 42, 109, calc(0.10 * var(--glow-m))), transparent 58%),
-        radial-gradient(900px 700px at 55% 112%, rgba(255, 206, 0, calc(0.06 * var(--glow-y))), transparent 60%),
-        radial-gradient(1000px 600px at 8% 108%, rgba(122, 47, 247, calc(0.10 * var(--glow-m))), transparent 62%),
-        linear-gradient(180deg, var(--sky-top) 0%, var(--sky-mid) 55%, var(--sky-hor) 100%);
+    background-color: var(--bg-color);
+    background-image:
+        radial-gradient(1200px 700px at 10% -8%, rgba(0, 240, 255, 0.11), transparent 60%),
+        radial-gradient(1000px 620px at 90% 4%, rgba(255, 42, 109, 0.09), transparent 58%),
+        radial-gradient(900px 700px at 55% 112%, rgba(255, 206, 0, 0.05), transparent 60%),
+        radial-gradient(1000px 600px at 8% 108%, rgba(122, 47, 247, 0.09), transparent 62%),
+        linear-gradient(180deg, color-mix(in srgb, var(--bg-color) 82%, #223250) 0%, transparent 46%);
     background-attachment: fixed;
     color: var(--text-primary);
     font-family: var(--font-body);
@@ -129,7 +118,7 @@ h1, h2, h3, h4, h5, h6 {
     letter-spacing: 0.03em;
     line-height: 1.2;
 }
-h1 { color: var(--text-strong); text-shadow: 0 0 2px rgba(0, 240, 255, calc(0.7 * var(--glow-c))), 0 0 22px rgba(0, 240, 255, calc(0.2 * var(--glow-c))); letter-spacing: 0.02em; }
+h1 { color: var(--text-strong); text-shadow: 0 0 2px rgba(0, 240, 255, 0.7), 0 0 22px rgba(0, 240, 255, 0.2); letter-spacing: 0.02em; }
 .stMarkdown p, .stMarkdown li { color: var(--text-primary); }
 label p { color: var(--text-secondary) !important; font-weight: 600 !important; }
 .stCaption, .stCaption p { color: var(--text-muted) !important; }
@@ -176,7 +165,7 @@ label p { color: var(--text-secondary) !important; font-weight: 600 !important; 
 .panel {
     position: relative;
     border-radius: var(--radius-lg);
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent 34%), rgba(9, 13, 26, var(--card-alpha));
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent 34%), rgba(9, 13, 26, 0.52);
     border: 1px solid var(--stroke);
     -webkit-backdrop-filter: var(--glass-blur-md);
     backdrop-filter: var(--glass-blur-md);
@@ -204,11 +193,11 @@ label p { color: var(--text-secondary) !important; font-weight: 600 !important; 
     font-weight: 600;
     text-transform: uppercase;
     margin-bottom: 0.6rem;
-    text-shadow: 0 0 10px rgba(0, 240, 255, calc(0.4 * var(--glow-c)));
+    text-shadow: 0 0 10px rgba(0, 240, 255, 0.4);
 }
 .floating-card {
     border-radius: var(--radius-lg);
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 32%), rgba(9, 13, 26, var(--card-alpha));
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 32%), rgba(9, 13, 26, 0.52);
     border: 1px solid var(--stroke);
     -webkit-backdrop-filter: var(--glass-blur-weak);
     backdrop-filter: var(--glass-blur-weak);

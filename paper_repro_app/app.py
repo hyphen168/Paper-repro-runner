@@ -17,7 +17,7 @@ except Exception:  # pragma: no cover - GUI may not be available in headless env
 
 from paper_repro_app.config_store import LocalConfigStore
 from paper_repro_app.database import TaskStore
-from paper_repro_app.day_night import css_vars_block, now_day_night_vars, weather_tint
+from paper_repro_app.day_night import bg_color_for, css_vars_block, now_day_night_vars
 from paper_repro_app.diagnostics import EnvironmentDiagnostics
 from paper_repro_app.log_analyzer import LogAnalyzer
 from paper_repro_app.logging_config import DEFAULT_LOG_FILE, get_logger
@@ -244,23 +244,19 @@ def render_pipeline_steps(task: dict, store: TaskStore) -> None:
 
 
 def _dn_sample_with_weather(prev=None) -> dict:
-    """昼夜采样并叠加天气天空色调（阴/雨/雪时压暗天空，保持画面语义一致）。"""
+    """背景亮度：天气明度系数 × 昼夜因子 → 单色插值（背景不单独配色）。"""
     vars_now = now_day_night_vars(prev=prev)
     try:
         kind = describe(get_weather()).get("kind") or ""
     except Exception:
         kind = ""
-    if kind:
-        vars_now = weather_tint(vars_now, kind)
+    vars_now["bg_color"] = bg_color_for(kind, vars_now["day_factor"])
     return vars_now
 
 
 def _dn_persist(vars_now: dict) -> None:
-    st.session_state["dn_prev"] = {k: vars_now[k] for k in (
-        "day_factor", "sky_top", "sky_mid", "sky_hor", "sun_a", "moon_a",
-        "star_alpha", "glow_c", "glow_m", "glow_y", "card_alpha", "card_bright",
-        "particle_bright")}
-    st.session_state["dn_day"] = 1 if vars_now["sun_a"] > 0.5 else 0
+    st.session_state["dn_prev"] = vars_now.get("day_factor")
+    st.session_state["dn_day"] = 1 if vars_now.get("sun_a", 0) > 0.5 else 0
 
 
 @st.fragment(run_every=60.0)
@@ -273,7 +269,8 @@ def _day_night_tick() -> None:
         vars_now = None
     if vars_now:
         _dn_persist(vars_now)
-        st.markdown(css_vars_block(vars_now), unsafe_allow_html=True)
+        st.markdown(f"<style>:root {{ --bg-color: {vars_now['bg_color']}; }}</style>",
+                    unsafe_allow_html=True)
     else:
         st.session_state.pop("dn_prev", None)
 
@@ -533,7 +530,8 @@ def render_app() -> None:
         try:
             _vars0 = _dn_sample_with_weather()
             _dn_persist(_vars0)
-            st.markdown(css_vars_block(_vars0), unsafe_allow_html=True)
+            st.markdown(f"<style>:root {{ --bg-color: {_vars0['bg_color']}; }}</style>",
+                        unsafe_allow_html=True)
         except Exception:
             pass
     else:

@@ -342,3 +342,19 @@ def weather_tint(v: dict, kind: str) -> dict:
     out["sky_mid"] = mix_hex(v["sky_mid"], tint, w)
     out["sky_hor"] = mix_hex(v["sky_hor"], tint, min(1.0, w * 1.6))
     return out
+
+# ============ 背景亮度（天气 × 昼夜 → 单色深浅） ============
+# 用户约定：背景不单独配色，只按天气与明暗在固定深蓝底上调整亮度。
+_WEATHER_LIFT = {
+    "clear": 1.15, "partly": 1.0, "cloudy": 0.86, "fog": 0.80,
+    "rain": 0.68, "heavy_rain": 0.55, "storm": 0.45, "snow": 0.85,
+}
+_BG_BASE = "#0A1120"
+_BG_LIGHT = "#3A4A6E"
+
+
+def bg_color_for(kind: str, day_factor: float) -> str:
+    """按天气明度系数 × 昼夜因子插值背景底色（夜晚近深蓝黑，晴昼明亮，雷雨压暗）。"""
+    coef = _WEATHER_LIFT.get(kind, 0.9)
+    p = clamp(coef * max(0.0, min(1.0, day_factor)), 0.0, 0.9)
+    return mix_hex(_BG_BASE, _BG_LIGHT, p)
