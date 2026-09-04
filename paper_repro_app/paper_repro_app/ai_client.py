@@ -94,8 +94,22 @@ def list_models(base_url: str, api_key: str, timeout=(10, 30)) -> tuple:
 
 
 def chat_once(messages: List[Dict[str, str]], base_url: str, api_key: str,
-              model: str, max_tokens: int = 1200, timeout=(15, 150)) -> tuple:
-    """非流式单轮。返回 (ok, text|err)。"""
+              model: str, max_tokens: int = 1200, timeout=(15, 150),
+              provider: str = "", tier: str = "") -> tuple:
+    """非流式单轮。provider/tier 非空时按思考强度档位解析模型与参数（单次请求级）。
+    返回 (ok, text|err)。"""
+    if tier:
+        resolved = resolve_request(provider, model, tier)
+        max_tokens = resolved["max_tokens"]
+        timeout = resolved["timeout"]
+        model = resolved["model"]
+        body = {"model": model, "messages": messages, "max_tokens": max_tokens}
+        if resolved["extra_body"]:
+            body.update(resolved["extra_body"])
+        if resolved.get("temperature") is not None and not is_reasoning_model(model):
+            body["temperature"] = resolved["temperature"]
+        ok, text, _info = _post_chat(base_url, api_key, body, timeout)
+        return ok, text
     url = base_url.rstrip("/") + "/chat/completions"
     body = {"model": model, "messages": messages, "max_tokens": max_tokens}
     try:
@@ -141,3 +155,98 @@ def chat_stream(messages: List[Dict[str, str]], base_url: str, api_key: str,
 def assert_no_key_leak(text: str, api_key: str) -> bool:
     """发送/命令生成前断言不含 Key 原文。"""
     return not api_key or api_key not in text
+
+# ---------- 思考强度（mobile_trust 规范 P1：快速/标准/深度） ----------
+TIER_SPEC = {
+    "fast": {"max_tokens": 800, "temperature": 0.3, "timeout": (15, 90)},
+    "standard": {"max_tokens": 1400, "temperature": None, "timeout": (15, 150)},
+    "deep": {"max_tokens": 2400, "temperature": None, "timeout": (30, 420)},
+}
+DEFAULT_TIER = "standard"
+
+# 各服务商深度档模型与思考参数（reasoning 专用字段 = 可剥离组）
+_REASON_THINK_FIELD = {
+    "qwen": ("enable_thinking", True),
+    "glm": ("thinking", True),
+}
+_REASON_MODEL_OVERRIDE = {
+    "deepseek": "deepseek-reasoner",
+}
+_REASON_PREFIXES = ("o1", "o3", "o4", "gpt-5", "deepseek-reasoner", "kimi-k2-thinking")
+_THINKING_MODELS = {"qwen3-max", "glm-4.5", "glm-4.6", "kimi-k2-thinking"}
+
+
+def is_reasoning_model(model: str) -> bool:
+    m = (model or "").lower()
+    return any(m.startswith(p) for p in _REASON_PREFIXES) or m in _THINKING_MODELS
+
+
+def resolve_request(provider: str, model: str, tier: str) -> dict:
+    """档位 -> (final_model, extra_body, max_tokens, temperature, timeout, note)。
+
+    仅作用于单次请求，不回写已保存 model。返回 dict 供 chat 函数使用。
+    """
+    tier = tier if tier in TIER_SPEC else DEFAULT_TIER
+    spec = TIER_SPEC[tier]
+    final_model = model
+    extra_body = {}
+    note = ""
+    p_lower = (provider or "").lower()
+    if tier == "fast":
+        return {"model": final_model, "extra_body": extra_body, "max_tokens": spec["max_tokens"],
+                "temperature": spec["temperature"], "timeout": spec["timeout"], "note": note}
+    if tier == "deep":
+        if is_reasoning_model(model):
+            # 已是推理模型：仅注入参数
+            if p_lower in ("通义 qwen",) or "qwen" in p_lower:
+                extra_body["enable_thinking"] = True
+            elif "glm" in p_lower:
+                extra_body["thinking"] = True
+            elif model.lower().startswith(("o1", "o3", "o4", "gpt-5")):
+                extra_body["reasoning_effort"] = "high"
+        else:
+            # 深度档：按服务商换思考模型/参数
+            if "deepseek" in p_lower:
+                final_model = "deepseek-reasoner"
+            elif "qwen" in p_lower:
+                final_model = "qwen3-max"
+                extra_body["enable_thinking"] = True
+            elif "glm" in p_lower or "bigmodel" in p_lower:
+                final_model = "glm-4.5"
+                extra_body["thinking"] = True
+            elif "openai" in p_lower:
+                note = "深度档建议使用 o 系或 gpt-5 思考模型（可手改模型名）"
+            elif "moonshot" in p_lower or "kimi" in p_lower:
+                note = "深度档建议模型 kimi-k2-thinking（可手改模型名）"
+            else:
+                note = "自定义端点深度档仅提升输出长度；如服务商有思考模型请手改模型名"
+        return {"model": final_model, "extra_body": extra_body, "max_tokens": spec["max_tokens"],
+                "temperature": spec["temperature"], "timeout": spec["timeout"], "note": note}
+    return {"model": final_model, "extra_body": extra_body, "max_tokens": spec["max_tokens"],
+            "temperature": spec["temperature"], "timeout": spec["timeout"], "note": note}
+
+
+def _strip_reasoning_fields(body: dict) -> dict:
+    """剥离 reasoning 专用字段组（400 降级重试用）。"""
+    return {k: v for k, v in body.items() if k not in ("enable_thinking", "thinking", "reasoning_effort", "temperature")}
+
+
+def _post_chat(base_url: str, api_key: str, body: dict, timeout) -> tuple:
+    """POST /chat/completions，返回 (ok, text, info)。HTTP 400 且字段类错误自动剥离重试。"""
+    url = base_url.rstrip("/") + "/chat/completions"
+    try:
+        resp = requests.post(url, headers=_headers(api_key), json=body, timeout=timeout)
+        if resp.status_code == 400 and any(k in resp.text.lower() for k in ("parameter", "argument", "not supported", "unrecognized")):
+            stripped = _strip_reasoning_fields(body)
+            if stripped != body:
+                resp2 = requests.post(url, headers=_headers(api_key), json=stripped, timeout=timeout)
+                if resp2.status_code == 200:
+                    content = (resp2.json().get("choices") or [{}])[0].get("message", {}).get("content") or ""
+                    return True, content, {"degraded": True}
+                resp = resp2
+        if resp.status_code != 200:
+            return False, "接口错误（HTTP %s）：%s" % (resp.status_code, resp.text[:240]), {}
+        content = (resp.json().get("choices") or [{}])[0].get("message", {}).get("content") or ""
+        return True, content, {}
+    except requests.RequestException as exc:
+        return False, "网络错误：%s" % str(exc)[:160], {}

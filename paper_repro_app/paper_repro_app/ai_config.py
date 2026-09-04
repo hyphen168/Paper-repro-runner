@@ -77,6 +77,7 @@ def save_credentials(config: Dict[str, Any]) -> bool:
             CRED_DIR.mkdir(parents=True, exist_ok=True)
             CRED_FILE.write_bytes(_encrypt(api_key))
             # 元数据（不含 key）单独明文存便于快速读取
+            merged.setdefault("thinking", "standard")
             meta = {k: v for k, v in merged.items() if k != "api_key"}
             meta_path = CRED_DIR / "llm_meta.json"
             meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")

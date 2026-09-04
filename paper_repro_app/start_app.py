@@ -273,7 +273,7 @@ def open_browser(url: str, port: int) -> None:
         _log(f"未能自动打开浏览器（不影响使用，手动访问 {url}）: {exc}")
 
 
-def start_app(expose: str = "") -> None:
+def start_app(expose: str = "", no_browser: bool = False) -> None:
     # 若默认端口已被占用，大概率是应用已在运行，直接打开浏览器而非再起一个实例
     if is_port_in_use(DEFAULT_PORT):
         url = f"http://127.0.0.1:{DEFAULT_PORT}"
@@ -323,8 +323,11 @@ def start_app(expose: str = "") -> None:
             break
         time.sleep(0.4)
     if ready:
-        _log("服务已就绪，打开浏览器...")
-        open_browser(url, port)
+        if no_browser:
+            _log(f"服务已就绪（不打开浏览器）: {url}")
+        else:
+            _log("服务已就绪，打开浏览器...")
+            open_browser(url, port)
         if expose == "lan":
             for ip in get_local_ips():
                 if ip != "127.0.0.1":
@@ -344,8 +347,9 @@ if __name__ == "__main__":
     _parser = argparse.ArgumentParser(description="论文复现助手启动器")
     _parser.add_argument("--expose", choices=["lan", "tunnel"], default="",
                          help="远程访问模式：lan=局域网(0.0.0.0+口令)；tunnel=供 SSH 反隧回环（仍绑 127.0.0.1）")
+    _parser.add_argument("--no-browser", action="store_true", help="启动后不自动打开浏览器（供开机自启常驻）")
     _args = _parser.parse_args()
     check_system_python()
     ensure_virtualenv()
     ensure_dependencies()
-    start_app(expose=_args.expose)
+    start_app(expose=_args.expose, no_browser=_args.no_browser)
