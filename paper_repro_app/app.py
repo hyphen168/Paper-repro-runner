@@ -22,7 +22,7 @@ from paper_repro_app.diagnostics import EnvironmentDiagnostics
 from paper_repro_app.log_analyzer import LogAnalyzer
 from paper_repro_app.logging_config import DEFAULT_LOG_FILE, get_logger
 from paper_repro_app.paper_parser import extract_repo_url
-from paper_repro_app.remote_runner import RemoteRunner, inject_public_key
+from paper_repro_app.remote_runner import RemoteRunner, inject_public_key, parse_ssh_candidates
 from paper_repro_app.ssh_utils import (ensure_default_ssh_keypair, ensure_ssh_key_file,
                                        resolve_ssh_profile, test_ssh_connection, write_ssh_profile)
 from paper_repro_app.task_utils import (format_log_preview, get_local_ips, get_step_order,
@@ -670,7 +670,11 @@ def render_app() -> None:
             st.markdown("##### 云服务器（SSH）")
             c1, c2, c3, c4 = st.columns([3, 1, 1.4, 1.6])
             with c1:
-                cloud_host = st.text_input("服务器地址 / IP", value=saved.get("cloud_host", "") or "my-server.example.com")
+                cloud_host = st.text_input(
+    "服务器地址 / IP（可多行填写多台候选，自动选用可达者）",
+    value=saved.get("cloud_host", "") or "my-server.example.com",
+    help="AutoDL 等实例每次开机地址可能变化：可一次粘贴多台（每行一条），也支持完整 ssh 命令如 ssh -p 38662 root@connect.xxx.seetacloud.com。提交任务时自动探测并选用第一台可达的机器。",
+)
             with c2:
                 ssh_port = st.text_input("端口", value=str(saved.get("ssh_port") or "22"))
             with c3:
@@ -856,6 +860,28 @@ def render_app() -> None:
             resolved_cloud_user = resolved_profile.get("user") or cloud_user.strip() or "ubuntu"
             resolved_ssh_key = resolved_profile.get("key") or ssh_key_path.strip() or "~/.ssh/id_rsa"
             resolved_ssh_port = ssh_port.strip() or resolved_profile.get("port") or "22"
+
+            # ---- 自动识别候选机：目标串优先 + 主机框多行/多台 ----
+            import re as _re
+            cand_lines = [ssh_target_value] if ssh_target_value else []
+            for _ln in _re.split(r"[\n;,]+", cloud_host.strip()):
+                _ln = _ln.strip()
+                if _ln and _ln != resolved_cloud_host:
+                    cand_lines.append(_ln)
+            if cand_lines:
+                host_candidates = parse_ssh_candidates(
+                    cand_lines,
+                    default_user=(cloud_user.strip() or "root"),
+                    default_port=int(resolved_ssh_port or 22),
+                )
+                if host_candidates:
+                    resolved_cloud_host = host_candidates[0]["host"]
+                    resolved_cloud_user = host_candidates[0]["user"] or resolved_cloud_user
+                    resolved_ssh_port = str(host_candidates[0]["port"])
+            else:
+                host_candidates = []
+            if len(host_candidates) > 1:
+                st.caption(f"已登记 {len(host_candidates)} 台候选机器，提交后自动探测并选用可达者执行。")
             if not cloud_password.strip() and not ensure_ssh_key_file(resolved_ssh_key):
                 st.error("SSH 凭据无效，任务已阻止提交：填写的“SSH 私钥路径”不是可用的私钥文件，且未提供云服务器密码，后台将无法连接云服务器。")
                 st.caption("排查建议：① 私钥路径应为真实私钥文件或粘贴私钥全文；② 填写云服务器密码；③ 确认端口为实例实际开放的 SSH 端口；④ 可先在上方“SSH 私钥/免密登录”区点击“测试 SSH 连接”验证凭据。")
@@ -880,7 +906,7 @@ def render_app() -> None:
                 {
                     "pip_index_url": pip_index_url.strip(),
                     "ssh_target": ssh_target_value,
-                    "cloud_host": resolved_cloud_host,
+                    "cloud_host": (cloud_host.strip() if cloud_host.strip() else resolved_cloud_host),
                     "cloud_user": resolved_cloud_user,
                     "ssh_key_path": resolved_ssh_key,
                     "ssh_port": resolved_ssh_port,
@@ -941,7 +967,9 @@ def render_app() -> None:
             st.session_state["task_log_preview"] = "任务已提交，后台流水线已启动，监控页每 2 秒自动刷新实时进度。"
 
             store.update_task_status(task["id"], "running", "任务已进入云端执行阶段，准备按流水线执行复现步骤。", current_step="prepare")
-            started, startup_msg = start_pipeline_execution(task["id"], password=cloud_password)
+            started, startup_msg = start_pipeline_execution(
+                task["id"], password=cloud_password, hosts=host_candidates or None,
+            )
             if not started:
                 st.error(f"新任务未能启动：{startup_msg}。旧任务可能仍在结束中，请稍候在「任务监控」点击重新执行。")
             st.rerun()

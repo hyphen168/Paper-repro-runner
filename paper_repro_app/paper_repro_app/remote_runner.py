@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import base64
 import os
+import re
 import shlex
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -51,6 +53,63 @@ class TaskCancelled(RuntimeError):
     """A remote command failure that cannot be resolved by reconnecting."""
 
 
+def probe_host(host: str, port: int, timeout: float = 3.0) -> bool:
+    """TCP 探测：主机可达即认为候选可用（不校验凭据）。"""
+    if not host:
+        return False
+    try:
+        sock = socket.create_connection((host, int(port) if str(port).isdigit() else 22), timeout=timeout)
+        sock.close()
+        return True
+    except (OSError, socket.timeout):
+        return False
+
+
+def parse_ssh_candidates(lines, default_user: str = "root", default_port: int = 22) -> List[Dict[str, Any]]:
+    """把多行候选（每行：host / host:port / user@host[:port] / 完整 ssh 命令）解析为候选列表。
+
+    AutoDL 等动态实例：每次开机地址可能变化，支持把多台机器都填上，提交任务时自动识别可达者。
+    """
+    candidates: List[Dict[str, Any]] = []
+    seen = set()
+    for raw in lines:
+        line = (raw or "").strip()
+        if not line or line.startswith("#"):
+            continue
+        host = port = user = None
+        if line.lower().startswith("ssh "):
+            # ssh -p 38662 root@connect.xxx.seetacloud.com
+            m = re.search(r"\s+-p\s+(\d+)", line)
+            if m:
+                port = int(m.group(1))
+            m = re.search(r"(\S+)@([\w.-]+)", line)
+            if m:
+                user, host = m.group(1), m.group(2)
+            if not host:
+                host = line.split()[-1]
+        elif "@" in line:
+            head, _, rest = line.partition("@")
+            user = head or default_user
+            host = rest
+        else:
+            host = line
+        if host and ":" in host and not host.startswith("["):
+            host, _, port_s = host.rpartition(":")
+            port = int(port_s) if port_s.isdigit() else port
+        if not host:
+            continue
+        cand = {
+            "host": host,
+            "port": int(port) if port else int(default_port or 22),
+            "user": user or default_user or "root",
+        }
+        key = (cand["host"], cand["port"], cand["user"])
+        if key not in seen:
+            seen.add(key)
+            candidates.append(cand)
+    return candidates
+
+
 def _is_auth_exception(exc: BaseException) -> bool:
     """判断是否为 SSH 认证类失败（Authentication failed 一族）。
 
@@ -75,6 +134,18 @@ class RemoteRunner:
     def __init__(self, task: Dict[str, Any], max_retries: int = 2):
         self.task = task
         self.host = task.get("host")
+        # 自动识别候选（task 可携带多主机，运行时探测选可达者；缺省回落单机）
+        raw_cands = task.get("hosts") or []
+        parsed: List[Dict[str, Any]] = []
+        for c in raw_cands:
+            if isinstance(c, dict) and c.get("host"):
+                parsed.append(c)
+        if not parsed:
+            parsed = parse_ssh_candidates(
+                [str(task.get("host") or "")], default_user=task.get("user") or "root",
+                default_port=int(task.get("port") or task.get("ssh_port") or 22),
+            )
+        self.candidates = parsed
         self.user = task.get("user")
         self.ssh_key_path = task.get("ssh_key_path")
         self.password = task.get("password")
@@ -641,8 +712,30 @@ class RemoteRunner:
         self._cancel_event = cancel_event
         if cancel_event is not None and cancel_event.is_set():
             return {"status": "cancelled", "message": "任务已被用户取消（尚未开始执行）。"}
-        if not self.host or not self.user:
+        if not self.host and not self.candidates:
             return {"status": "failed", "message": "云服务器连接信息不完整，请补充主机和用户名。"}
+
+        # ---- 自动识别可用主机：按候选顺序 TCP 探测，选第一台可达 ----
+        reachable = [c for c in self.candidates if probe_host(c["host"], c["port"], timeout=3.0)]
+        if reachable:
+            picked = reachable[0]
+            self.host, self.port, self.user = picked["host"], picked["port"], picked["user"]
+            self._log.info(f"自动识别：{len(reachable)}/{len(self.candidates)} 台可达，选用 {self.user}@{self.host}:{self.port}")
+        else:
+            tried = "; ".join(f"{c['user']}@{c['host']}:{c['port']}" for c in self.candidates)
+            only = self.candidates[0] if len(self.candidates) == 1 else None
+            if only and self.host and self.user and probe_host(self.host, int(self.port) if str(self.port).isdigit() else 22, timeout=3.0):
+                self._log.info(f"自动识别：{self.user}@{self.host}:{self.port} 探测通过，开始执行")
+            else:
+                return {
+                    "status": "failed",
+                    "message": (
+                        "远程执行失败：自动识别 " + str(len(self.candidates)) + " 台候选均无法连接（" + tried + "）。"
+                        "请确认实例已开机，且地址端口已更新为最新 SSH 登录信息（AutoDL 每次开机地址可能变化；"
+                        "可在填写框一次粘贴多台机器，系统自动选用可达者）。"
+                    ),
+                    "attempts": len(self.candidates),
+                }
 
         if paramiko is None:
             return {"status": "failed", "message": "paramiko 未安装，请在本地运行 pip install paramiko。"}

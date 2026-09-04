@@ -35,6 +35,8 @@ def _run_pipeline_in_background(task_id: str) -> None:
         return
     # 密码只存在于进程内存（提交时注入），不落库：按任务 id 从内存密码表取回
     task["password"] = str(_get_exec_state().get("task_passwords", {}).get(task_id) or "")
+    # 自动识别候选机（多台候选仅内存传递，不落库；重跑旧任务回落单机）
+    task["hosts"] = _get_exec_state().get("task_hosts", {}).get(task_id) or []
     cancel_event = _get_exec_state().get("cancel_events", {}).get(task_id)
     runner = RemoteRunner(task)
     live_log: list[str] = []
@@ -118,13 +120,18 @@ def _run_pipeline_in_background(task_id: str) -> None:
         store.update_task_status(task_id, "failed", f"结果整理阶段异常：{exc}", current_step="failed")
 
 
-def start_pipeline_execution(task_id: str, password: str = "") -> tuple[bool, str]:
-    """启动后台流水线线程；已有线程存活时拒绝重复启动。"""
+def start_pipeline_execution(task_id: str, password: str = "", hosts: list | None = None) -> tuple[bool, str]:
+    """启动后台流水线线程；已有线程存活时拒绝重复启动。
+
+    hosts: 自动识别候选（多台机器每行一条），执行时探测选可达者；None 回落任务单机。
+    """
     state = _get_exec_state()
     thread = state.get("thread")
     if thread is not None and thread.is_alive():
         return False, "已有流水线正在后台运行，请等待其结束后再重试。"
     state.setdefault("task_passwords", {})[task_id] = password or state.get("task_passwords", {}).get(task_id, "")
+    if hosts:
+        state.setdefault("task_hosts", {})[task_id] = hosts
     state.setdefault("cancel_events", {})[task_id] = threading.Event()
     new_thread = threading.Thread(
         target=_run_pipeline_in_background,
