@@ -672,7 +672,7 @@ def render_app() -> None:
             with c1:
                 cloud_host = st.text_input(
     "服务器地址 / IP（可多行填写多台候选，自动选用可达者）",
-    value=saved.get("cloud_host", "") or "my-server.example.com",
+    value=saved.get("cloud_host", "") or "",
     help="AutoDL 等实例每次开机地址可能变化：可一次粘贴多台（每行一条），也支持完整 ssh 命令如 ssh -p 38662 root@connect.xxx.seetacloud.com。提交任务时自动探测并选用第一台可达的机器。",
 )
             with c2:
@@ -689,6 +689,16 @@ def render_app() -> None:
             ssh_meta = resolve_ssh_profile(ssh_target, saved.get("cloud_host", ""), saved.get("cloud_user", ""), saved.get("ssh_key_path", ""))
             if ssh_target.strip() and ssh_meta:
                 st.caption("已自动识别：" + ", ".join(f"{key}={value}" for key, value in ssh_meta.items()) + "（可修改上方字段覆盖）")
+            # 连接健康条（检测按钮结果；提交前可选参考，不强制）
+            _health = st.session_state.get("ssh_health")
+            if _health:
+                _h_ok = bool(_health.get("ok"))
+                st.markdown(
+                    f"<div class='ssh-health {'ok' if _h_ok else 'fail'}'><span class='status-dot' "
+                    f"style='background: {'#00ffa3' if _h_ok else '#ff2b4a'};'></span>"
+                    f"{'连接就绪：' if _h_ok else '连接失败：'}{_health.get('msg', '')}</div>",
+                    unsafe_allow_html=True,
+                )
 
             default_cloud_host = ssh_meta.get("host") or saved.get("cloud_host") or cloud_host.strip() or "my-server.example.com"
             default_cloud_user = ssh_meta.get("user") or saved.get("cloud_user") or cloud_user.strip() or "root"
@@ -808,10 +818,8 @@ def render_app() -> None:
                     password=cloud_password,
                     alias=(ssh_alias or default_ssh_alias).strip() or "papercloud",
                 )
-                if ok:
-                    st.success(msg)
-                else:
-                    st.error(msg)
+                st.session_state["ssh_health"] = {"ok": bool(ok), "msg": msg}
+                st.rerun()
             if inject_key_btn:
                 ok, msg = inject_public_key(
                     host=(cloud_host or default_cloud_host).strip(),
@@ -857,7 +865,7 @@ def render_app() -> None:
             ssh_target_value = ssh_target.strip()
             resolved_profile = resolve_ssh_profile(ssh_target_value, cloud_host.strip(), cloud_user.strip(), ssh_key_path.strip())
             resolved_cloud_host = resolved_profile.get("host") or cloud_host.strip() or "my-server.example.com"
-            resolved_cloud_user = resolved_profile.get("user") or cloud_user.strip() or "ubuntu"
+            resolved_cloud_user = resolved_profile.get("user") or cloud_user.strip() or "root"
             resolved_ssh_key = resolved_profile.get("key") or ssh_key_path.strip() or "~/.ssh/id_rsa"
             resolved_ssh_port = ssh_port.strip() or resolved_profile.get("port") or "22"
 

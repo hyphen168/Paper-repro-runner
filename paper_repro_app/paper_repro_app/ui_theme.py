@@ -591,6 +591,19 @@ code { background: rgba(0, 240, 255, 0.1); color: var(--cyan); border-radius: 4p
     .rise-in, .kb-cursor { animation: none !important; }
     .kb-cursor { opacity: 1; }
 }
+/* SSH 连接健康条 */
+.ssh-health {
+    display: flex; align-items: center; gap: 0.5rem;
+    font-family: var(--font-mono);
+    font-size: 0.76rem;
+    border-radius: var(--radius-md);
+    padding: 0.5rem 0.85rem;
+    margin: 0.4rem 0;
+    border: 1px solid;
+    letter-spacing: 0.03em;
+}
+.ssh-health.ok { color: #a9f5d0; border-color: rgba(0, 255, 163, 0.35); background: rgba(0, 255, 163, 0.06); }
+.ssh-health.fail { color: #ffb3c0; border-color: rgba(255, 43, 74, 0.4); background: rgba(255, 43, 74, 0.07); }
 </style>
 """
 

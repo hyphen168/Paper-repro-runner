@@ -15,6 +15,21 @@ from paper_repro_app.dataset_discovery import DatasetDiscovery
 from paper_repro_app.model_discovery import ModelDiscovery
 
 try:
+    from paper_repro_app.ssh_utils import classify_conn_error, parse_connection_profile, sanitize, ssh_connect
+except ImportError:  # pragma: no cover
+    def classify_conn_error(exc):  # noqa: ARG001
+        return "other"
+
+    def parse_connection_profile(line, ctx=None):  # noqa: ARG001
+        return {"host": line or "", "user": "root", "port": 22}
+
+    def sanitize(text):
+        return text
+
+    def ssh_connect(profile, timeout=12.0):
+        raise RuntimeError("ssh_connect unavailable")
+
+try:
     from paper_repro_app.logging_config import get_logger
     logger = get_logger("remote_runner")
 except ImportError:  # pragma: no cover
@@ -53,60 +68,40 @@ class TaskCancelled(RuntimeError):
     """A remote command failure that cannot be resolved by reconnecting."""
 
 
-def probe_host(host: str, port: int, timeout: float = 3.0) -> bool:
-    """TCP 探测：主机可达即认为候选可用（不校验凭据）。"""
+def probe_host(host: str, port: int, timeout: float = 6.0, attempts: int = 2) -> bool:
+    """L1 TCP 探测（分类用，不单独否决）：单次 6s、默认重试 1 次，容忍慢网络/DNS。"""
     if not host:
         return False
-    try:
-        sock = socket.create_connection((host, int(port) if str(port).isdigit() else 22), timeout=timeout)
-        sock.close()
-        return True
-    except (OSError, socket.timeout):
-        return False
+    for _ in range(max(1, attempts)):
+        try:
+            sock = socket.create_connection((host, int(port) if str(port).isdigit() else 22), timeout=timeout)
+            sock.close()
+            return True
+        except (OSError, socket.timeout):
+            continue
+    return False
 
 
 def parse_ssh_candidates(lines, default_user: str = "root", default_port: int = 22) -> List[Dict[str, Any]]:
-    """把多行候选（每行：host / host:port / user@host[:port] / 完整 ssh 命令）解析为候选列表。
-
-    AutoDL 等动态实例：每次开机地址可能变化，支持把多台机器都填上，提交任务时自动识别可达者。
-    """
-    candidates: List[Dict[str, Any]] = []
-    seen = set()
-    for raw in lines:
-        line = (raw or "").strip()
-        if not line or line.startswith("#"):
-            continue
-        host = port = user = None
-        if line.lower().startswith("ssh "):
-            # ssh -p 38662 root@connect.xxx.seetacloud.com
-            m = re.search(r"\s+-p\s+(\d+)", line)
-            if m:
-                port = int(m.group(1))
-            m = re.search(r"(\S+)@([\w.-]+)", line)
-            if m:
-                user, host = m.group(1), m.group(2)
-            if not host:
-                host = line.split()[-1]
-        elif "@" in line:
-            head, _, rest = line.partition("@")
-            user = head or default_user
-            host = rest
-        else:
-            host = line
-        if host and ":" in host and not host.startswith("["):
-            host, _, port_s = host.rpartition(":")
-            port = int(port_s) if port_s.isdigit() else port
-        if not host:
+    """多行候选解析（委托引擎 parse_connection_profile，R1 已修复：@ 后空白截断 + -p 任意形态）。"""
+    from paper_repro_app.ssh_utils import build_connection_profiles
+    profiles = build_connection_profiles(
+        lines, ctx={"user": default_user or "root", "port": int(default_port or 22)},
+    )
+    candidates = []
+    for prof in profiles:
+        if "error" in prof or not prof.get("host"):
             continue
         cand = {
-            "host": host,
-            "port": int(port) if port else int(default_port or 22),
-            "user": user or default_user or "root",
+            "host": prof["host"],
+            "port": int(prof.get("port") or default_port or 22),
+            "user": prof.get("user") or default_user or "root",
         }
-        key = (cand["host"], cand["port"], cand["user"])
-        if key not in seen:
-            seen.add(key)
-            candidates.append(cand)
+        if prof.get("key_path"):
+            cand["key_path"] = prof["key_path"]
+        if prof.get("alias"):
+            cand["alias"] = prof["alias"]
+        candidates.append(cand)
     return candidates
 
 
@@ -715,31 +710,10 @@ class RemoteRunner:
         if not self.host and not self.candidates:
             return {"status": "failed", "message": "云服务器连接信息不完整，请补充主机和用户名。"}
 
-        # ---- 自动识别可用主机：按候选顺序 TCP 探测，选第一台可达 ----
-        reachable = [c for c in self.candidates if probe_host(c["host"], c["port"], timeout=3.0)]
-        if reachable:
-            picked = reachable[0]
-            self.host, self.port, self.user = picked["host"], picked["port"], picked["user"]
-            self._log.info(f"自动识别：{len(reachable)}/{len(self.candidates)} 台可达，选用 {self.user}@{self.host}:{self.port}")
-        else:
-            tried = "; ".join(f"{c['user']}@{c['host']}:{c['port']}" for c in self.candidates)
-            only = self.candidates[0] if len(self.candidates) == 1 else None
-            if only and self.host and self.user and probe_host(self.host, int(self.port) if str(self.port).isdigit() else 22, timeout=3.0):
-                self._log.info(f"自动识别：{self.user}@{self.host}:{self.port} 探测通过，开始执行")
-            else:
-                return {
-                    "status": "failed",
-                    "message": (
-                        "远程执行失败：自动识别 " + str(len(self.candidates)) + " 台候选均无法连接（" + tried + "）。"
-                        "请确认实例已开机，且地址端口已更新为最新 SSH 登录信息（AutoDL 每次开机地址可能变化；"
-                        "可在填写框一次粘贴多台机器，系统自动选用可达者）。"
-                    ),
-                    "attempts": len(self.candidates),
-                }
-
         if paramiko is None:
             return {"status": "failed", "message": "paramiko 未安装，请在本地运行 pip install paramiko。"}
 
+        # ---- 凭据前置（P0-3）：无任何认证源先报“缺凭据”，不做无谓网络探测 ----
         auth_state = self.detect_ssh_auth_sources()
         key_candidates = auth_state["key_candidates"]
         resolved_key = auth_state.get("resolved_key")
@@ -751,8 +725,87 @@ class RemoteRunner:
         if not login_methods:
             return {
                 "status": "failed",
-                "message": "服务器已启动，但本机没有可用 SSH 认证来源。请确认你已复制真实私钥内容或有效 key 文件路径，并且本机已可用 ssh-agent / ~/.ssh/config / IdentityFile。",
+                "message": "未找到可用 SSH 认证源：请填写云服务器密码，或提供有效私钥（真实文件路径或粘贴 PEM 全文），或在本机 ssh-agent 中加载密钥。",
                 "attempts": 0,
+            }
+
+        # ---- L1：并行可达分类（只排序与诊断，不判死；单台 6s×2 重试，总预算 ≤12s） ----
+        cands = self.candidates or [{"host": self.host, "port": int(self.port) if str(self.port).isdigit() else 22,
+                                     "user": self.user}]
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=min(8, len(cands))) as _ex:
+                reach_flags = list(_ex.map(lambda c: probe_host(c["host"], c["port"]), cands))
+        except Exception:
+            reach_flags = [False] * len(cands)
+        ok_list = [c for c, ok in zip(cands, reach_flags) if ok]
+        rest_list = [c for c, ok in zip(cands, reach_flags) if not ok]
+        order = ok_list + rest_list
+        self._log.info(
+            "自动识别：候选 " + str(len(cands)) + " 台（TCP 可达 " + str(len(ok_list))
+            + "），按可达优先顺序进行真实凭据连接"
+        )
+
+        # ---- L2：真实凭据连接（决定性）——每台 12s，auth 短路，其它转台 ----
+        last_err = None
+        for cand in order:
+            if cancel_event is not None and cancel_event.is_set():
+                return {"status": "cancelled", "message": "任务已被用户取消（连接阶段）。"}
+            profile = {
+                "host": cand["host"],
+                "port": int(cand.get("port") or self.port or 22),
+                "user": cand.get("user") or self.user or "root",
+                "password": self.password or "",
+            }
+            if cand.get("key_path"):
+                profile["key_path"] = cand["key_path"]
+            elif resolved_key and os.path.exists(resolved_key):
+                profile["key_path"] = resolved_key
+            elif key_candidates:
+                profile["key_path"] = key_candidates[0]
+            probe_ssh = None
+            try:
+                probe_ssh = ssh_connect(profile, timeout=12.0)
+                self.host, self.port, self.user = profile["host"], profile["port"], profile["user"]
+                self._log.info(f"自动识别：已真实连接 {self.user}@{self.host}:{self.port}（凭据握手通过）")
+                probe_ssh.close()
+                last_err = None
+                break
+            except Exception as exc:
+                last_err = exc
+                cat = classify_conn_error(exc)
+                self._log.warning(f"候选 {cand.get('user')}@{cand['host']}:{cand.get('port')} 连接失败（{cat}）：{exc}")
+                if cat == "auth":
+                    # 同组凭据：首台认证失败即判定凭据级错误，短路返回精准诊断
+                    return {
+                        "status": "failed",
+                        "message": (
+                            f"SSH 认证失败（{type(exc).__name__}）：{profile['user']}@{profile['host']}:{profile['port']} "
+                            "拒绝了当前凭据。排查：1) 密码是否正确（AutoDL 密码在控制台实例页设置）；"
+                            "2) 私钥是否与公钥配对，公钥已加入服务器 authorized_keys（可点“注入公钥”）；"
+                            "3) 确认端口为实例当前开放端口（AutoDL 通常 4xxxx）。"
+                        ),
+                        "attempts": 1,
+                    }
+            finally:
+                if probe_ssh is not None:
+                    try:
+                        probe_ssh.close()
+                    except Exception:
+                        pass
+        if last_err is not None:
+            tried = "; ".join(
+                f"{c.get('user')}@{c['host']}:{c.get('port')}（{classify_conn_error(last_err) if c is order[-1] else 'x'}）"
+                for c in order
+            )
+            return {
+                "status": "failed",
+                "message": (
+                    "自动识别 " + str(len(order)) + " 台候选均无法完成连接（" + tried + "）。"
+                    "请确认实例已开机，且地址端口为控制台最新 SSH 登录信息（AutoDL 换机后地址会变；"
+                    "可在填写框一次粘贴多台，程序自动选用可用者）。"
+                ),
+                "attempts": len(order),
             }
 
         self._log.info(f"开始在 {self.host}:{self.port} ({self.user}) 上执行远程复现流水线 (trace: {self._trace_id})")
@@ -1057,7 +1110,7 @@ def inject_public_key(
         code = stdout.channel.recv_exit_status()
         if code == 0 and "PUBKEY_INJECTED" in out:
             return True, (
-                f"✅ 公钥已成功注入 {user_value}@{host_value}：~/.ssh/authorized_keys "
+                f"公钥已成功注入 {user_value}@{host_value}：~/.ssh/authorized_keys "
                 "（不存在时已自动追加）。现在提交任务直接使用自动生成的私钥即可，密码可留空。"
             )
         return False, f"公钥注入命令执行失败（退出码 {code}）：{err or out or '无输出'}"

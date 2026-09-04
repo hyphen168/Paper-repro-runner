@@ -41,8 +41,14 @@ def _run_pipeline_in_background(task_id: str) -> None:
     runner = RemoteRunner(task)
     live_log: list[str] = []
 
+    try:
+        from paper_repro_app.ssh_utils import sanitize
+    except ImportError:
+        def sanitize(x):
+            return x
+
     def on_step(step_id: str, step_title: str, message: str) -> None:
-        timestamped = f"[{datetime.now().strftime('%H:%M:%S')}] [{step_id}] {message.strip()}"
+        timestamped = f"[{datetime.now().strftime('%H:%M:%S')}] [{step_id}] {sanitize(message.strip())}"
         live_log.append(timestamped)
         trimmed_log = "\n".join(live_log[-30:])
         store.update_task_status(task_id, "running", trimmed_log, current_step=step_id)
