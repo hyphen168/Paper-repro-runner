@@ -6,6 +6,7 @@ import json
 import os
 import re
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -159,6 +160,8 @@ def build_comparison_table(result: dict, task: dict) -> str:
             "gap": "—",
             "note": "论文基准未录入（paper_claims.json）或复现未输出指标，本次未做指标对比。",
         }]
+    # 结构化对比行随任务结果落库，供界面渲染结果对比图（条形/分组柱状）
+    result["comparison_rows"] = rows
     return generate_experiment_table(rows)
 
 
@@ -298,6 +301,112 @@ def is_task_running(task_id: str) -> bool:
     state = _get_exec_state()
     thread = state.get("thread")
     return bool(thread is not None and thread.is_alive() and state.get("task_id") == task_id)
+
+
+# ================= 批量串行调度器（队列中任务按创建顺序依次执行，同一时刻只跑一个） =================
+def _drainer_loop() -> None:
+    """批量调度线程：空闲时等 kick；有 queued 任务时标记 running、启动流水线线程并等待其结束，
+    结束后取下一个。任何异常都不退出线程（置当前任务 failed 后继续），避免批量任务被卡死。"""
+    state = _get_exec_state()
+    store = TaskStore(DB_PATH)
+    while not state.get("drain_stop", False):
+        try:
+            task = store.get_oldest_queued()
+            if not task:
+                evt = state.get("wake")
+                if evt is None:
+                    state["wake"] = threading.Event()
+                    evt = state["wake"]
+                evt.clear()
+                evt.wait(timeout=6.0)
+                continue
+            task_id = str(task.get("id") or "")
+            if not task_id:
+                continue
+            # 先创建取消事件，再置 running，避免“取消发生在取件与启动之间”的竞态丢事件
+            state.setdefault("cancel_events", {})[task_id] = threading.Event()
+            try:
+                store.update_task_status(
+                    task_id, "running",
+                    "批量任务开始执行：调度器已接管，批次内任务按创建顺序依次运行（同一时刻仅一个任务占用云端）。",
+                    current_step="prepare",
+                )
+            except Exception:
+                pass
+            # 二次确认：置 running 期间若已被外部取消/跳过则直接取下一件
+            try:
+                _cur = store.get_task(task_id)
+                if str((_cur or {}).get("status", "")).lower() != "running":
+                    continue
+            except Exception:
+                pass
+            t = threading.Thread(
+                target=_run_pipeline_in_background,
+                args=(task_id,),
+                daemon=True,
+                name=f"pipeline-{task_id}",
+            )
+            state["thread"] = t
+            state["task_id"] = task_id
+            state["started_at"] = datetime.now()
+            t.start()
+            t.join()
+            # 兜底：流水线线程意外崩溃且未落终态时，标记失败以免“永远 running”
+            try:
+                after = store.get_task(task_id)
+                if str((after or {}).get("status", "running")).lower() in {"queued", "running"}:
+                    store.update_task_status(task_id, "failed",
+                                             "批量执行器检测到流水线线程异常退出（可能应用被关闭）。可到「任务监控」点击重新执行。",
+                                             current_step="failed")
+            except Exception:
+                pass
+        except Exception:
+            # 线程内任何异常都不得中断调度循环
+            try:
+                time.sleep(1.0)
+            except Exception:
+                pass
+
+
+def ensure_batch_drainer() -> None:
+    """确保批量调度线程存在并唤醒；幂等。"""
+    state = _get_exec_state()
+    evt = state.get("wake")
+    if evt is not None:
+        evt.set()
+    drainer = state.get("drainer")
+    if drainer is not None and drainer.is_alive():
+        return
+    state["wake"] = threading.Event()
+    new_drainer = threading.Thread(target=_drainer_loop, daemon=True, name="batch-drainer")
+    state["drainer"] = new_drainer
+    new_drainer.start()
+
+
+def wake_batch_drainer() -> None:
+    """有新排队任务时调用：立即唤醒调度线程去取件。"""
+    state = _get_exec_state()
+    evt = state.get("wake")
+    if evt is not None:
+        evt.set()
+    drainer = state.get("drainer")
+    if drainer is None or not drainer.is_alive():
+        ensure_batch_drainer()
+
+
+def cancel_batch(batch_id: str) -> int:
+    """取消整批：排队任务直接标记结束，正在运行的请求中止。返回受影响数量。"""
+    store = TaskStore(DB_PATH)
+    tasks = store.list_tasks_by_batch(batch_id)
+    affected = 0
+    for task in tasks:
+        status = str(task.get("status", "")).lower()
+        if status in {"queued", "running"}:
+            store.update_task_status(
+                task["id"], "cancelled", "批量任务已由用户取消。", current_step="cancelled")
+            cancel_task(task["id"], wait_seconds=2.0)
+            affected += 1
+    return affected
 
 
 def resolve_repo_url(repo_hint: str, detected_repo: str | None) -> str:

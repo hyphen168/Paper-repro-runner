@@ -1,7 +1,9 @@
 import json
 import os
+import re
 import subprocess
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -35,10 +37,14 @@ from paper_repro_app.ssh_utils import (ensure_default_ssh_keypair, ensure_ssh_ke
                                        resolve_ssh_profile, test_ssh_connection, write_ssh_profile)
 from paper_repro_app.task_utils import (format_log_preview, get_local_ips, get_step_order,
                                         get_status_color, read_log_tail)
-from paper_repro_app.storage_utils import (_get_exec_state, cancel_task, detect_remote_workdir,
-                                           ensure_local_storage_tree, is_task_running, resolve_repo_url,
-                                           start_pipeline_execution)
+from paper_repro_app.storage_utils import (_get_exec_state, cancel_batch, cancel_task, detect_remote_workdir,
+                                           ensure_batch_drainer, ensure_local_storage_tree, is_task_running,
+                                           resolve_repo_url, start_pipeline_execution, wake_batch_drainer)
 from paper_repro_app.logger_utils import enrich_log_for_display
+from paper_repro_app.comparison_charts import comparison_points as chart_points
+from paper_repro_app.comparison_charts import long_dataframe as chart_long_df
+from paper_repro_app.comparison_charts import wide_dataframe as chart_wide_df
+from paper_repro_app.localtime import location_now as loc_location_now
 from paper_repro_app.paths import DB_PATH, migrate_legacy_data
 from paper_repro_app.repo_crawler import AutoRepoDatasetCrawler
 from paper_repro_app.ui_theme import APP_CSS, build_carousel_html, build_stepper_html
@@ -229,6 +235,48 @@ def _render_failure_card(task_id: str, message: str, diag: dict, raw_result: str
             st.rerun()
 
 
+def _render_comparison_chart(comparison_rows: list | None) -> None:
+    """复现 vs 论文 结果对比图：分组柱状图（仅渲染两侧都有数值的真实对比行）。
+
+    主题配色：灰色=论文宣称，绿色=本次复现；图表区域窄时自动提高高度防重叠。
+    """
+    try:
+        points = [p for p in chart_points(comparison_rows)
+                  if p.get("paper") is not None and p.get("repro") is not None]
+        if not points:
+            return
+        import altair as alt
+        df = chart_long_df(points)
+        if df.empty:
+            return
+        metrics_n = int(df["metric"].nunique())
+        base = alt.Chart(df).mark_bar(size=26).encode(
+            x=alt.X("metric:N", title=None, axis=alt.Axis(labelLimit=140, labelAngle=0)),
+            xOffset="series:N",
+            y=alt.Y("value:Q", title="指标数值"),
+            color=alt.Color(
+                "series:N",
+                scale=alt.Scale(domain=["论文宣称", "复现结果"], range=["#8fa3c7", "#00ffa3"]),
+                legend=alt.Legend(title=None, orient="top"),
+            ),
+            tooltip=[
+                alt.Tooltip("metric:N", title="指标"),
+                alt.Tooltip("series:N", title="来源"),
+                alt.Tooltip("value:Q", title="数值", format=".4g"),
+            ],
+        )
+        labels = base.mark_text(dy=-6, size=10, color="#cfe2ff").encode(
+            text=alt.Text("value:Q", format=".4g"))
+        st.markdown("#### 复现 vs 论文 结果对比图")
+        st.altair_chart(
+            (base + labels).properties(height=max(180, 46 * metrics_n)),
+            use_container_width=True,
+        )
+        st.caption("灰色＝论文宣称 · 绿色＝本次复现；仅展示两侧均有数值的指标（百分号已归一为原数字）。")
+    except Exception:
+        return
+
+
 def _render_success_result(result: dict, task_meta: str = "") -> None:
     """成功任务结果展示：结果说明行 + 指标卡 + 论文对比表 + 报告链接（监控/历史共用）。"""
     analysis = result.get("analysis") or {}
@@ -269,6 +317,7 @@ def _render_success_result(result: dict, task_meta: str = "") -> None:
     if comparison_table:
         st.markdown("#### 论文指标对比（复现 vs 原文）")
         st.markdown(comparison_table)
+    _render_comparison_chart(result.get("comparison_rows") or [])
     if task_meta:
         st.caption(task_meta)
 
@@ -736,6 +785,35 @@ def _access_gate() -> bool:
     return False
 
 
+def _collect_batch_chart_points(tasks: list) -> list:
+    """汇总同批次多篇成功任务的对比行，产出合并对比点（指标名加仓库前缀防冲突）。
+
+    用于「批量任务」页的结果总览图：只收集论文基准与复现两侧均有数值的行。
+    """
+    merged: list = []
+    for task in tasks:
+        status = str(task.get("status", "")).lower()
+        repo_short = (task.get("repo_url") or "?").rsplit("/", 1)[-1][:26]
+        if status != "success":
+            continue
+        try:
+            payload = json.loads(str(task.get("log") or "{}"))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        rows = payload.get("comparison_rows") or []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            paper, repro = row.get("paper"), row.get("repro")
+            if paper in (None, "—", "") or repro in (None, "未发现", ""):
+                continue
+            metric = f"{repo_short}\n{row.get('metric', '指标')}"
+            merged.append({"metric": metric, "paper": str(paper), "repro": str(repro)})
+    return merged
+
+
 def render_app() -> None:
     st.set_page_config(page_title="论文复现助手", layout="wide")
     _access_gate()
@@ -766,6 +844,17 @@ def render_app() -> None:
             f"<div class='weather-chip'><span class='dot-mark'></span>"
             f"{weather_info['label']} {weather_info['temp']:.0f}°C{city_part}</div>"
         )
+    # 当地时间胶囊：天气/昼夜一律按「天气位置的当地墙上时钟」计算，不随机器时区漂移
+    local_time_chip = ""
+    try:
+        _loc_city = weather_info.get("city") or ""
+        _loc_hhmm = loc_location_now().strftime("%H:%M")
+        local_time_chip = (
+            f"<div class='weather-chip'><span class='dot-mark' style='background:#ffd76e;'></span>"
+            f"⏱ {(_loc_city + ' · ') if _loc_city else ''}当地时刻 {_loc_hhmm}</div>"
+        )
+    except Exception:
+        local_time_chip = ""
     # 运行状态胶囊（整页级数据，随页面 rerun 刷新；不挂 2s 轮询）
     try:
         _latest = store.list_tasks(limit=1)
@@ -790,6 +879,7 @@ def render_app() -> None:
         "<div class='header-cluster'>",
         _pill,
         weather_chip,
+        local_time_chip,
         "</div>",
         "</div>",
     ]
@@ -981,7 +1071,7 @@ def render_app() -> None:
     if storage_state_key not in st.session_state:
         st.session_state[storage_state_key] = storage_default
 
-    tab_submit, tab_monitor, tab_history = st.tabs(["提交任务", "任务监控", "历史记录"])
+    tab_submit, tab_monitor, tab_history, tab_batch = st.tabs(["提交任务", "任务监控", "历史记录", "批量任务"])
     with tab_submit:
         with st.expander("本地输出目录（可选，默认使用用户目录）", expanded=False):
             storage_col, action_col = st.columns([5, 1.6])
@@ -1019,6 +1109,36 @@ def render_app() -> None:
                 cloud_user = st.text_input("用户名", value="", placeholder="root")
             with c4:
                 cloud_password = st.text_input("密码（留空则用 SSH 私钥）", value="", type="password")
+            # —— 主机输入即时解析：完整 ssh 命令 / user@host / host / 多行候选 / ssh 别名 ——
+            _cloud_meta: dict = {}
+            if (cloud_host or "").strip():
+                _raw_lines = [ln for ln in re.split(r"[\n;,]+\s*", cloud_host) if ln.strip()]
+                try:
+                    _parsed_hosts = parse_ssh_candidates(
+                        _raw_lines or [cloud_host.strip()],
+                        default_user=(cloud_user or "root").strip(),
+                        default_port=int((ssh_port or "22").strip() or 22),
+                    )
+                except Exception:
+                    _parsed_hosts = []
+                if _parsed_hosts:
+                    _cloud_meta = _parsed_hosts[0]
+                    _parts = []
+                    if _cloud_meta.get("host"):
+                        _parts.append("host=" + str(_cloud_meta["host"]))
+                    if _cloud_meta.get("user"):
+                        _parts.append("user=" + str(_cloud_meta["user"]))
+                    if _cloud_meta.get("port"):
+                        _parts.append("port=" + str(_cloud_meta["port"]))
+                    if _cloud_meta.get("key_path"):
+                        _parts.append("key=" + str(_cloud_meta["key_path"]))
+                    if _cloud_meta.get("alias"):
+                        _parts.append("alias=" + str(_cloud_meta["alias"]))
+                    _more = f"（另 {len(_parsed_hosts) - 1} 台候选）" if len(_parsed_hosts) > 1 else ""
+                    st.caption("✅ 已解析服务器：" + " · ".join(_parts) + _more
+                               + "；下方测试/注入/生成配置按钮均使用该解析结果。")
+            else:
+                _cloud_meta = {}
             ssh_target = st.text_input(
                 "SSH 连接串（可选：填 user@host 或 ssh 命令会自动解析，覆盖上方字段）",
                 value="",
@@ -1157,21 +1277,26 @@ def render_app() -> None:
                 test_conn_btn = st.button("测试 SSH 连接", use_container_width=True, key="test_ssh_conn")
             with bc3:
                 inject_key_btn = st.button("注入公钥到服务器", use_container_width=True, key="inject_pub_key")
+            # —— 按钮统一使用即时解析结果（粘贴完整 ssh 命令也不出错） ——
+            _eff_host = str(_cloud_meta.get("host") or "").strip() or (cloud_host.strip() or default_cloud_host).strip()
+            _eff_user = str(_cloud_meta.get("user") or "").strip() or (cloud_user.strip() or default_cloud_user).strip()
+            _eff_port = str(_cloud_meta.get("port") or "").strip() or (ssh_port.strip() or "22")
+            _eff_key = ssh_key_path.strip() or str(_cloud_meta.get("key_path") or "").strip() or default_ssh_key
             if gen_profile_btn:
                 profile_path = write_ssh_profile(
                     ssh_alias.strip() or "papercloud",
-                    cloud_host.strip() or default_cloud_host,
-                    cloud_user.strip() or default_cloud_user,
-                    ssh_port.strip() or "22",
-                    ssh_key_path.strip() or default_ssh_key,
+                    _eff_host,
+                    _eff_user,
+                    _eff_port,
+                    _eff_key,
                 )
                 st.success(f"SSH 配置已写入 {profile_path}，可执行 ssh {ssh_alias.strip() or 'papercloud'}")
             if test_conn_btn:
                 ok, msg = test_ssh_connection(
-                    host=(cloud_host or default_cloud_host).strip(),
-                    user=(cloud_user or default_cloud_user).strip(),
-                    port=ssh_port.strip() or "22",
-                    key=ssh_key_path.strip() or default_ssh_key,
+                    host=_eff_host,
+                    user=_eff_user,
+                    port=_eff_port,
+                    key=_eff_key,
                     password=cloud_password,
                     alias=(ssh_alias or default_ssh_alias).strip() or "papercloud",
                 )
@@ -1179,14 +1304,132 @@ def render_app() -> None:
                 st.rerun()
             if inject_key_btn:
                 ok, msg = inject_public_key(
-                    host=(cloud_host or default_cloud_host).strip(),
-                    user=(cloud_user or default_cloud_user).strip(),
-                    port=ssh_port.strip() or "22",
-                    key=ssh_key_path.strip() or default_ssh_key,
+                    host=_eff_host,
+                    user=_eff_user,
+                    port=_eff_port,
+                    key=_eff_key,
                     password=cloud_password,
                     public_key=generated_ssh_public_key,
                 )
                 st.success(msg) if ok else st.error(msg)
+
+        # ============ 批量复现：多篇论文/仓库 排队逐篇执行 ============
+        with st.expander("批量复现：一次粘贴多篇论文/仓库，排队逐篇执行", expanded=False):
+            st.caption("每行一篇（论文链接或代码仓库地址）。逐篇自动识别仓库后按创建顺序依次在云端执行，同一时刻只跑一个任务，避免互相抢占与重复计费。需先在上方填好云服务器与凭据。")
+            batch_papers = st.text_area(
+                "论文 / 仓库清单（每行一篇）",
+                value="",
+                height=110,
+                placeholder="https://arxiv.org/abs/2607.10851\nhttps://github.com/tonmoy-hossain/Locus\n每行一篇，可混合论文链接与仓库地址",
+            )
+            bcol1, bcol2 = st.columns([2.2, 1])
+            with bcol1:
+                batch_run_train = st.checkbox(
+                    "批量执行训练（逐篇自动识别训练入口；不勾选＝每篇仅安全验证与依赖检查，更省算力）",
+                    value=False,
+                )
+            with bcol2:
+                batch_go = st.button("提交批量复现任务", key="batch_go", type="primary", use_container_width=True)
+            if batch_go:
+                lines = [ln.strip() for ln in re.split(r"[\r\n]+\s*", batch_papers or "") if ln.strip()]
+                uniq: list = []
+                _seen: set = set()
+                for ln in lines:
+                    if ln not in _seen:
+                        _seen.add(ln)
+                        uniq.append(ln)
+                if not uniq:
+                    st.error("请先在上方粘贴至少一篇论文链接或仓库地址（每行一篇）。")
+                elif len(uniq) > 30:
+                    st.error("单批最多 30 篇，请分批提交。")
+                else:
+                    # —— 主机解析：与单任务一致（支持整行 ssh 命令 / user@host:port / 别名） ——
+                    _ssh_target_value = ssh_target.strip()
+                    _rp0 = resolve_ssh_profile(_ssh_target_value, cloud_host.strip(), cloud_user.strip(), ssh_key_path.strip())
+                    _bhost = str(_rp0.get("host") or cloud_host.strip() or "").strip()
+                    _buser = str(_rp0.get("user") or cloud_user.strip() or "root").strip()
+                    _bport = str(_rp0.get("port") or ssh_port.strip() or "22")
+                    _bkey = ssh_key_path.strip() or str(_rp0.get("key") or "").strip() or default_ssh_key
+                    _blocal_dir = (st.session_state.get("selected_local_data_dir") or local_data_dir
+                                   or str(Path.home() / "paper_repro_data")).strip()
+                    if not _bhost:
+                        st.error("请先在上方填写云服务器地址：可整行粘贴 ssh -p 端口 user@host 登录命令。")
+                    elif not cloud_password.strip() and not ensure_ssh_key_file(_bkey):
+                        st.error("缺少 SSH 凭据：请在密码框填写云服务器密码，或提供有效私钥路径后重试。")
+                        st.caption("提示：换新云服务器后密码不会自动保存（安全策略），首次提交请手动输入该实例的登录密码。")
+                    else:
+                        batch_id = "batch-" + uuid.uuid4().hex[:8]
+                        created: list = []
+                        unresolved: list = []
+                        _pw_state = _get_exec_state()
+                        _pw_state.setdefault("task_passwords", {})
+                        with st.spinner("正在逐篇识别代码仓库并创建排队任务…（每篇需要数秒）"):
+                            for ln in uniq:
+                                try:
+                                    repo_url = ""
+                                    _best = None
+                                    try:
+                                        _crawl = AutoRepoDatasetCrawler().evaluate_and_rank_candidates(ln, "")
+                                        _best = _crawl.get("best_candidate") or {}
+                                        repo_url = str(_best.get("repo_url") or "")
+                                    except Exception:
+                                        _best = {}
+                                    if not repo_url:
+                                        repo_url = resolve_repo_url("", extract_repo_url(ln)) or ""
+                                    if not repo_url and (ln.lower().startswith(("http://", "https://"))):
+                                        # 直连仓库地址兜底：明显是代码仓库页面时直接采用
+                                        if any(k in ln.lower() for k in ("github.com", "gitlab.com", "gitee.com", ".git", "huggingface.co")):
+                                            repo_url = ln.rstrip("/")
+                                    if not repo_url:
+                                        unresolved.append(ln)
+                                        continue
+                                    _remote_dir = detect_remote_workdir(ln, _buser, _bhost)
+                                    _clone = (clone_url or "").strip() or _best.get("accelerated_url") or _best.get("clone_url") or repo_url
+                                    task = store.create_task(
+                                        paper_url=ln if ln.lower().startswith(("http://", "https://")) else "",
+                                        repo_url=repo_url,
+                                        host=_bhost,
+                                        user=_buser,
+                                        ssh_key_path=os.path.expanduser(_bkey),
+                                        port=_bport,
+                                        clone_url=_clone,
+                                        pip_index_url=(pip_index_url or "").strip(),
+                                        remote_workdir=_remote_dir,
+                                        local_data_dir=os.path.expanduser(_blocal_dir),
+                                        environment_mode=env_mode,
+                                        run_command="",
+                                        command_timeout=int(command_timeout) * 60,
+                                        data_config="",
+                                        model_weights="",
+                                        auto_download_dataset=batch_run_train,
+                                        auto_run=batch_run_train,
+                                        tune_args="",
+                                        data_split="",
+                                        batch_id=batch_id,
+                                        status="queued",
+                                        current_step="queued",
+                                    )
+                                    _pw_state["task_passwords"][task["id"]] = cloud_password
+                                    created.append(task)
+                                except Exception:
+                                    unresolved.append(ln)
+                        if created:
+                            ensure_local_storage_tree(os.path.expanduser(_blocal_dir))
+                            wake_batch_drainer()
+                            store_mem_note = (
+                                "批量执行训练" if batch_run_train else "每篇执行安全验证（依赖检查＋入口识别，不训练）"
+                            )
+                            st.success(
+                                f"✅ 已创建 {len(created)} 个排队任务（批次 {batch_id}），将{store_mem_note}。"
+                                f"前往「批量任务」页查看逐篇进度与结果总览。"
+                            )
+                        else:
+                            st.error("本批未能创建任何任务。")
+                        if unresolved:
+                            st.warning(f"{len(unresolved)} 篇未能自动识别代码仓库：" + "；".join(unresolved[:4])
+                                       + ("…" if len(unresolved) > 4 else "") + "。可改为直接粘贴仓库地址重试。")
+                        st.rerun()
+
         if submitted:
             auto_run = run_mode in {"auto", "tune"}
             selected_run_command = run_command.strip() if run_mode == "run" else ""
@@ -1442,6 +1685,73 @@ def render_app() -> None:
                 st.caption(f"日志存储路径: {DEFAULT_LOG_FILE}")
             else:
                 st.info("尚无后台系统日志输出。")
+
+    with tab_batch:
+        st.markdown("#### 批量任务总览")
+        st.caption("批量任务按提交顺序逐篇在云端执行（同一时刻只跑一个）。执行中批次的状态随页面刷新自动更新；单篇详情与监控请到「任务监控」或下方展开卡查看。")
+        _batches = store.list_batches(limit=20)
+        if not _batches:
+            st.info("还没有批量任务。前往「提交任务」页展开「批量复现」，一次粘贴多篇论文/仓库即可排队逐篇执行。")
+        for _batch in _batches:
+            _bid = _batch["batch_id"]
+            _total = int(_batch.get("total") or 0)
+            _ok = int(_batch.get("success") or 0)
+            _runn = int(_batch.get("running") or 0)
+            _q = int(_batch.get("queued") or 0)
+            _fail = int(_batch.get("failed") or 0)
+            _cancel = int(_batch.get("cancelled") or 0)
+            _pct = round(_ok * 100 / _total) if _total else 0
+            _head = f"{_bid} · 已完成 {_ok}/{_total}（{_pct}%）"
+            if _runn or _q:
+                _head += " · 🔄 执行中"
+            with st.expander(_head, expanded=bool(_runn or _q)):
+                _c1, _c2 = st.columns([6, 1])
+                with _c1:
+                    st.caption(f"排队 {_q} · 执行中 {_runn} · 成功 {_ok} · 失败 {_fail} · 取消 {_cancel}")
+                with _c2:
+                    if st.button("取消整批", key=f"bcancel_{_bid}", use_container_width=True):
+                        _n = cancel_batch(_bid)
+                        st.success(f"已取消 {_n} 个未结束任务。")
+                        st.rerun()
+                _btasks = store.list_tasks_by_batch(_bid)
+                for _task in _btasks:
+                    _status = str(_task.get("status", "unknown")).lower()
+                    _sc = get_status_color(_status)
+                    _label = {"queued": "排队", "running": "执行中", "success": "成功", "failed": "失败", "cancelled": "已取消"}.get(_status, _status)
+                    _repo_short = (str(_task.get("repo_url") or "").rsplit("/", 1)[-1][:40] or str(_task.get("paper_url") or "")[:40] or "未填写仓库")
+                    _tick = str(_task.get("current_step") or "queued")
+                    st.markdown(
+                        f"<div class='panel-row' style='padding:0.45rem 0.8rem;margin:0.3rem 0;'>"
+                        f"<div style='display:flex;justify-content:space-between;gap:0.6rem;align-items:center;flex-wrap:wrap;'>"
+                        f"<span><span class='status-dot' style='background:{_sc};'></span> "
+                        f"<b style='color:var(--text-strong);font-size:0.86rem;'>{_repo_short}</b>"
+                        f"<span style='color:var(--muted);font-size:0.72rem;margin-left:0.5rem;'>{_label} · {_tick}</span></span>"
+                        f"<span style='color:var(--muted);font-size:0.7rem;'>{_task['id']}</span></div></div>",
+                        unsafe_allow_html=True,
+                    )
+                    if _status == "success":
+                        try:
+                            _bp = json.loads(str(_task.get("log") or "{}"))
+                        except (json.JSONDecodeError, TypeError):
+                            _bp = {}
+                        if isinstance(_bp, dict) and (_bp.get("comparison_table") or _bp.get("comparison_rows")):
+                            with st.expander(f"结果详情 [{_task['id']}]", expanded=False):
+                                _render_success_result(_bp, task_meta=f"仓库 {_task.get('repo_url') or ''}")
+                    elif _status == "failed":
+                        with st.expander(f"失败诊断 [{_task['id']}]", expanded=False):
+                            try:
+                                _bp = json.loads(str(_task.get("log") or "{}"))
+                                _msg = str((_bp or {}).get("message") or "")[:900] or str(_task.get("log") or "")[:900]
+                            except (json.JSONDecodeError, TypeError):
+                                _msg = str(_task.get("log") or "")[:900]
+                            st.code(_msg or "（无更多日志）", language="text")
+                            st.caption("可在「任务监控」对该任务重新执行；批量队列会自动继续后续任务。")
+                _pts = _collect_batch_chart_points(_btasks)
+                if _pts:
+                    st.markdown("##### 本批结果对比总览")
+                    _render_comparison_chart(_pts)
+                    st.caption("横轴＝仓库＋指标；灰色＝论文宣称，绿色＝本次复现。仅汇总复现成功且论文基准可解析的任务。")
+
 
 if __name__ == "__main__":
     render_app()

@@ -1124,6 +1124,16 @@ def inject_public_key(
     user_value = (user or "").strip()
     port_value = (port or "22").strip()
     key_value = _resolve_key_file(key)
+    # 归一化：host 处允许直接粘贴完整 ssh 命令 / user@host / 别名（换云服务器场景）
+    try:
+        from paper_repro_app.ssh_utils import resolve_connection_fields as _rcf
+        _norm = _rcf(host, user, port, key)
+        host_value = _norm["host"]
+        user_value = _norm["user"]
+        port_value = _norm["port"] or "22"
+        key_value = _resolve_key_file(_norm.get("key") or key)
+    except Exception:
+        pass
     pub_value = (public_key or "").strip()
     if not host_value or not user_value:
         return False, "请先填写云服务器地址和用户名。"

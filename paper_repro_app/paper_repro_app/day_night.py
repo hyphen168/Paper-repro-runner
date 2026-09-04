@@ -185,25 +185,36 @@ def _moon_screen(lat: float, az_sun: float, alt: float):
 
 
 # ============ 采样主入口 ============
-def _alt_at_local_minute(base: datetime, minute: int, lat: float, lon: float) -> float:
-    """本地钟面第 minute 分钟的太阳高度（自动处理 UTC 跨日）。"""
-    t = base + timedelta(minutes=minute) - timedelta(seconds=time.localtime().tm_gmtoff)
+def _utc_offset_seconds(utc_offset_s: Optional[int]) -> int:
+    """换算用本地偏移：显式传入（当地）优先；None 用机器本机时区（旧行为）。"""
+    if utc_offset_s is not None:
+        return utc_offset_s
+    return time.localtime().tm_gmtoff
+
+
+def _alt_at_local_minute(base: datetime, minute: int, lat: float, lon: float, utc_offset_s: Optional[int] = None) -> float:
+    """本地钟面第 minute 分钟的太阳高度（自动处理 UTC 跨日）。
+
+    utc_offset_s：该本地钟面所属时区相对 UTC 的秒数；None 时用机器本机时区（旧行为）。
+    """
+    t = base + timedelta(minutes=minute) - timedelta(seconds=_utc_offset_seconds(utc_offset_s))
     day = _day_of_year(t)
     utc_h = t.hour + t.minute / 60.0 + t.second / 3600.0
     return solar_elevation_azimuth(day, utc_h, lat, lon)[0]
 
 
-def build_events(base: datetime, lat: float, lon: float):
+def build_events(base: datetime, lat: float, lon: float, utc_offset_s: Optional[int] = None):
     """返回当日（本地钟面）事件表（分钟）与各段起始相位；极昼/极夜兜底。
 
     用 10 分钟扫描检测太阳高度穿越 −0.833°（正穿=日出、负穿=日落），
     避免“UTC 跨日”导致二分区间端点同为黑夜/白昼的误判。
+    utc_offset_s：本地钟面所属时区偏移；None 时用机器本机时区（旧行为）。
     """
     target = -0.833
     rises, sets = [], []
     prev = None
     for m in range(0, 1441, 10):
-        alt = _alt_at_local_minute(base, m, lat, lon)
+        alt = _alt_at_local_minute(base, m, lat, lon, utc_offset_s=utc_offset_s)
         if prev is not None:
             if prev <= target < alt:
                 rises.append(m - 10 + 10 * (target - prev) / (alt - prev))
@@ -212,7 +223,7 @@ def build_events(base: datetime, lat: float, lon: float):
         prev = alt
     # 无穿越：极昼/极夜按正午高度判定
     if not rises or not sets:
-        noon_alt = _alt_at_local_minute(base, 720, lat, lon)
+        noon_alt = _alt_at_local_minute(base, 720, lat, lon, utc_offset_s=utc_offset_s)
         if noon_alt > 0:
             return [0.0, 1440.0], [4]  # 全天正午白天
         return [0.0, 1440.0], [0]      # 全天深宵
@@ -234,10 +245,14 @@ def build_events(base: datetime, lat: float, lon: float):
     return dedup, seg[:len(dedup) - 1]
 
 
-def sample_vars(now: datetime, lat: float, lon: float, prev: Optional[dict] = None) -> dict:
-    """当前时刻采样 → CSS 变量字典。prev 用于限幅防跳变。"""
-    # 本地时刻 → UTC（tm_gmtoff = 本地 − UTC 秒）
-    utc_dt = now - timedelta(seconds=time.localtime().tm_gmtoff)
+def sample_vars(now: datetime, lat: float, lon: float, prev: Optional[dict] = None, utc_offset_s: Optional[int] = None) -> dict:
+    """当前时刻采样 → CSS 变量字典。prev 用于限幅防跳变。
+
+    now 应为该时区的墙上时钟；utc_offset_s 为 now 所属时区偏移（None 用机器本机时区，旧行为）。
+    """
+    # 当地/本机时刻 → UTC（utc_offset_s 或 tm_gmtoff = 本地 − UTC 秒）
+    offset_s = _utc_offset_seconds(utc_offset_s)
+    utc_dt = now - timedelta(seconds=offset_s)
     day = _day_of_year(utc_dt)
     utc = utc_dt.hour + utc_dt.minute / 60.0 + utc_dt.second / 3600.0
     alt, az = solar_elevation_azimuth(day, utc, lat, lon)
@@ -247,7 +262,7 @@ def sample_vars(now: datetime, lat: float, lon: float, prev: Optional[dict] = No
                        - 0.006758 * math.cos(2 * g) + 0.000907 * math.sin(2 * g)
                        - 0.002697 * math.cos(3 * g) + 0.00148 * math.sin(3 * g))
     base_day = datetime(now.year, now.month, now.day)
-    edges, seg = build_events(base_day, lat, lon)
+    edges, seg = build_events(base_day, lat, lon, utc_offset_s=offset_s)
 
     now_m = now.hour * 60.0 + now.minute + now.second / 60.0
     idx = len(edges) - 2
@@ -319,9 +334,19 @@ def css_vars_block(v: dict) -> str:
 
 
 def now_day_night_vars(prev: Optional[dict] = None) -> dict:
-    """便捷入口：取定位并采样当前时刻。"""
+    """便捷入口：取定位并按「当地时刻」采样当前时刻。
+
+    当地偏移可用（天气缓存 utc_offset_seconds/经度近似）时，以天气位置当地墙上时钟采样，
+    使昼夜随当地时刻而不是机器时区；取不到偏移时保持旧行为（本机时刻 + 本机时区）。
+    """
     loc = load_location() or {"lat": 32.0, "lon": 0.0}
-    return sample_vars(datetime.now(), loc["lat"], loc["lon"], prev=prev)
+    from paper_repro_app.localtime import get_location_offset_seconds
+    offset_s = get_location_offset_seconds()
+    if offset_s is None:
+        return sample_vars(datetime.now(), loc["lat"], loc["lon"], prev=prev)
+    from datetime import timezone as _tz
+    now_local = datetime.now(_tz.utc).replace(tzinfo=None) + timedelta(seconds=offset_s)
+    return sample_vars(now_local, loc["lat"], loc["lon"], prev=prev, utc_offset_s=offset_s)
 
 # ============ 天气 → 天空色调联动 ============
 # 让画面语义与天气胶囊一致：阴/雨/雪/雾时把天空向灰蓝压暗，避免“阴天却亮蓝”的违和。

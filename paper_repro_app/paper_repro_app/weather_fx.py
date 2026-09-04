@@ -168,7 +168,19 @@ def _fetch_location() -> Optional[dict]:
         return None
 
 
+def _approx_utc_offset_seconds(lon) -> Optional[int]:
+    """按经度近似当地时区偏移（每 15° = 1 小时）。失败返回 None。"""
+    try:
+        return int(round(float(lon) / 15.0) * 3600)
+    except (TypeError, ValueError):
+        return None
+
+
 def _fetch_weather(lat: float, lon: float) -> Optional[dict]:
+    """请求 Open-Meteo（timezone=auto）：除天气外捕获当地 utc_offset_seconds。
+
+    open-meteo 在 timezone=auto 时于顶层返回当地时区偏移（秒）；缺失时按经度近似。
+    """
     try:
         url = (
             "https://api.open-meteo.com/v1/forecast"
@@ -177,22 +189,37 @@ def _fetch_weather(lat: float, lon: float) -> Optional[dict]:
             "&timezone=auto"
         )
         resp = requests.get(url, timeout=HTTP_TIMEOUT)
-        current = resp.json().get("current") or {}
-        return {
+        payload = resp.json()
+        current = payload.get("current") or {}
+        offset = payload.get("utc_offset_seconds")
+        if offset is None:
+            offset = _approx_utc_offset_seconds(lon)
+        result = {
             "code": int(current.get("weather_code", 0)),
             "temp": float(current.get("temperature_2m", 0)),
             "is_day": bool(current.get("is_day", 1)),
             "wind": float(current.get("wind_speed_10m", 0)),
         }
+        if offset is not None:
+            result["utc_offset_seconds"] = int(offset)
+        return result
     except Exception:
         return None
 
 
 def get_weather() -> Optional[dict]:
-    """获取本地天气（带 30 分钟缓存）。失败返回 None。"""
+    """获取本地天气（带 30 分钟缓存）。失败返回 None。
+
+    旧版缓存无 utc_offset_seconds 时按 lon 近似补上（不改写文件，保持缓存 TTL 语义）。
+    """
     cached = _read_cache()
     if cached:
-        return cached
+        result = dict(cached)
+        if result.get("utc_offset_seconds") is None and result.get("lon") is not None:
+            approx = _approx_utc_offset_seconds(result["lon"])
+            if approx is not None:
+                result["utc_offset_seconds"] = approx
+        return result
 
     location = _fetch_location()
     if not location:

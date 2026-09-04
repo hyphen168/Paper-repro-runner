@@ -43,7 +43,7 @@ class SQLiteOpenHelper:
 
 class TaskStore(SQLiteOpenHelper):
     def __init__(self, db_path: str | Path):
-        super().__init__(db_path, version=8)
+        super().__init__(db_path, version=9)
 
     def _connect(self) -> sqlite3.Connection:
         return self.get_connection()
@@ -73,6 +73,7 @@ class TaskStore(SQLiteOpenHelper):
                 data_split TEXT DEFAULT '',
                 status TEXT DEFAULT 'queued',
                 current_step TEXT DEFAULT 'queued',
+                batch_id TEXT DEFAULT '',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 log TEXT DEFAULT ''
@@ -98,6 +99,7 @@ class TaskStore(SQLiteOpenHelper):
             ("auto_run", "INTEGER DEFAULT 0"),
             ("tune_args", "TEXT DEFAULT ''"),
             ("data_split", "TEXT DEFAULT ''"),
+            ("batch_id", "TEXT DEFAULT ''"),
         ]:
             if col not in columns:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {col_type}")
@@ -114,8 +116,8 @@ class TaskStore(SQLiteOpenHelper):
                 INSERT INTO tasks (
                     id, paper_url, repo_url, clone_url, host, user, ssh_key_path, port, remote_workdir,
                     local_data_dir, environment_mode, run_command, command_timeout, data_config, model_weights,
-                    auto_download_dataset, auto_run, tune_args, data_split, status, current_step, log
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    auto_download_dataset, auto_run, tune_args, data_split, status, current_step, batch_id, log
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -139,6 +141,7 @@ class TaskStore(SQLiteOpenHelper):
                     kwargs.get("data_split", ""),
                     status,
                     current_step,
+                    kwargs.get("batch_id", ""),
                     log,
                 ),
             )
@@ -183,3 +186,41 @@ class TaskStore(SQLiteOpenHelper):
                 "UPDATE tasks SET log = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (merged, task_id),
             )
+
+    # ============ 批量任务队列 ============
+    def get_oldest_queued(self) -> Dict[str, Any]:
+        """取最早一个排队中的任务（供批量串行调度器取件）。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM tasks WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
+            ).fetchone()
+            return dict(row) if row else {}
+
+    def list_tasks_by_batch(self, batch_id: str) -> List[Dict[str, Any]]:
+        """某批次全部任务（按创建时间升序）。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tasks WHERE batch_id = ? ORDER BY created_at ASC",
+                (batch_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def list_batches(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """批次汇总：batch_id / 任务总数 / 各状态计数 / 最近更新时间。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT batch_id,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued,
+                       SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
+                       SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success,
+                       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                       SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled,
+                       MAX(updated_at) AS updated_at
+                FROM tasks WHERE batch_id <> ''
+                GROUP BY batch_id ORDER BY updated_at DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]

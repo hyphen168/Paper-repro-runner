@@ -103,10 +103,11 @@ def test_db_migration_v6_to_v8_keeps_data():
         try:
             cols = [r["name"] for r in c.execute("PRAGMA table_info(tasks)")]
             assert "tune_args" in cols and "data_split" in cols
+            assert "batch_id" in cols  # 批量复现新增列：旧库升级时自动补齐
             row = store.get_task("old-1")
             assert row is not None and row["paper_url"].startswith("https://arxiv.org")
             ver = c.execute("PRAGMA user_version").fetchone()[0]
-            assert ver == 8
+            assert ver == store.version  # 断言升到当前架构版本（迁移链最终态）
         finally:
             c.close()
             store._connect().close()

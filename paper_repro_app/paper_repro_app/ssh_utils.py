@@ -276,6 +276,39 @@ def expand_ssh_config(alias_or_host: str) -> dict:
     return resolved
 
 
+def resolve_connection_fields(raw_host: str, user: str = "", port: str = "", key: str = "") -> dict:
+    """把「主机输入框」任意文本归一化为 (host, user, port, key)。
+
+    支持：完整 ssh 命令（ssh -p 38662 -i key root@host）、user@host[:port]、host[:port]、
+    ssh 别名、多行（每行一条候选）。能解析出 host 时才覆盖调用方给出的兜底值，
+    解析失败保持原样，绝不抛异常——解决“换云服务器粘贴 ssh 命令时报错”类问题。
+    """
+    raw = (raw_host or "").strip()
+    out = {
+        "host": raw,
+        "user": (user or "").strip(),
+        "port": (port or "22").strip(),
+        "key": (key or "").strip(),
+    }
+    if not raw:
+        return out
+    lines = [ln for ln in re.split(r"[\n;,]+\s*", raw) if ln.strip()] or [raw]
+    ctx = {"user": out["user"] or "root", "port": int(out["port"] or 22)}
+    for line in lines:
+        prof = parse_connection_profile(line, ctx=ctx)
+        if prof.get("error") or not prof.get("host"):
+            continue
+        out["host"] = prof["host"]
+        if prof.get("user"):
+            out["user"] = prof["user"]
+        if prof.get("port"):
+            out["port"] = str(prof["port"])
+        if prof.get("key_path"):
+            out["key"] = prof["key_path"]
+        break
+    return out
+
+
 def build_connection_profiles(lines, ctx=None) -> list:
     """逐行解析为连接档案列表；error 行保留在 {"error"} 条目；去重键 (host, port, user)。"""
     profiles: list = []
@@ -507,12 +540,14 @@ def test_ssh_connection(
     alias: str | None = None,
     timeout: int = 12,
 ) -> tuple[bool, str]:
-    host_value = (host or "").strip()
-    user_value = (user or "").strip()
-    port_value = (port or "22").strip()
-    key_value = ensure_ssh_key_file(key)
+    # 归一化：允许在 host 处直接粘贴完整 ssh 命令 / user@host / 多行候选，避免把整条命令当主机名
+    _norm = resolve_connection_fields(host, user, port, key)
+    host_value = _norm["host"]
+    user_value = _norm["user"]
+    port_value = _norm["port"] or "22"
+    key_value = ensure_ssh_key_file(_norm.get("key") or key)
     if not host_value or not user_value:
-        return False, "请先填写云服务器地址和用户名。"
+        return False, "请先填写云服务器地址和用户名（支持整行粘贴 ssh -p 端口 user@host 登录命令）。"
     if password:
         try:
             import paramiko
