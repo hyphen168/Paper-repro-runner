@@ -540,15 +540,31 @@ def render_app() -> None:
             f"<div class='weather-chip'><span class='dot-mark'></span>"
             f"{weather_info['label']} {weather_info['temp']:.0f}°C{city_part}</div>"
         )
+    # 运行状态胶囊（整页级数据，随页面 rerun 刷新；不挂 2s 轮询）
+    try:
+        _latest = store.list_tasks(limit=1)
+        _st0 = str((_latest[0].get("status", "idle") if _latest else "idle")).lower()
+        _sc = get_status_color(_st0)
+        _pill = (
+            f"<div class='pr-pill'><span class='status-dot' style='background: {_sc}; box-shadow: 0 0 8px {_sc};'></span>"
+            f"<span style='color: {_sc};'>最近任务 · {_st0}</span></div>"
+        )
+    except Exception:
+        _pill = ""
+    rise = "rise-in" if st.session_state.get("dn_rise_done") is None else ""
+    st.session_state["dn_rise_done"] = True
     st.markdown(
         f"""
         <div class="fresh-header">
-            <div>
-                <div class="fresh-kicker">Paper Repro Runner</div>
+            <div class="{rise}">
+                <div class="fresh-kicker">Paper Repro Runner<span class="kb-cursor"></span></div>
                 <h1 style="margin: 0.15rem 0; font-size: clamp(1.9rem, 3.5vw, 2.6rem);">论文复现助手</h1>
                 <div class="fresh-sub">本地轻量控制端 · 云端计算执行器</div>
             </div>
-            {weather_chip}
+            <div class="header-cluster">
+                {_pill}
+                {weather_chip}
+            </div>
         </div>
         """,
         unsafe_allow_html=True,

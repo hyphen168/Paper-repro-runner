@@ -559,6 +559,38 @@ code { background: rgba(0, 240, 255, 0.1); color: var(--cyan); border-radius: 4p
     .fresh-header { flex-direction: column; align-items: flex-start; }
     .fx-step .cap { display: none; }
 }
+/* ===== 头部仪表条集群（Step3：专家组 P2-2） ===== */
+.header-cluster { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; justify-content: flex-end; }
+.pr-pill {
+    display: inline-flex; align-items: center; gap: 0.5rem;
+    font-family: var(--font-mono);
+    border-radius: var(--radius-full);
+    background: rgba(16, 23, 40, var(--amb-card, 0.5));
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    padding: 0.45rem 1rem;
+    color: var(--text-secondary);
+    font-size: 0.76rem;
+    letter-spacing: 0.06em;
+}
+.weather-chip:active { transform: scale(0.94); transition: transform 0.1s cubic-bezier(0.4, 0, 0.6, 1); }
+
+/* kicker 末端光标（打字机呼吸，非轮询 DOM） */
+.kb-cursor {
+    display: inline-block; width: 2px; height: 0.95em;
+    margin-left: 0.35rem; vertical-align: -0.12em;
+    background: var(--cyan);
+    box-shadow: 0 0 8px rgba(0, 240, 255, 0.8);
+    animation: kbBlink 1.1s steps(1) infinite;
+}
+@keyframes kbBlink { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0; } }
+
+/* 首帧 rise-in（仅首屏一次；fragment/轮询 DOM 不挂此动画） */
+.rise-in { animation: riseIn 0.45s var(--ease-out) both; }
+@keyframes riseIn { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+    .rise-in, .kb-cursor { animation: none !important; }
+    .kb-cursor { opacity: 1; }
+}
 </style>
 """
 
