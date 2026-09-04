@@ -652,6 +652,97 @@ code { background: rgba(0, 240, 255, 0.1); color: var(--cyan); border-radius: 4p
 }
 [data-testid="stPopoverBody"] p, [data-testid="stPopoverBody"] span { color: var(--text-secondary); }
 [data-testid="stPopoverBody"] button { min-height: 34px; }
+
+/* ============================================================
+   Summer Checkin UI · rain 场景覆盖层（深绿玻璃 × 柠檬绿强调）
+   依据全局技能 summer-checkin-ui-skill references/design-system.md §1/§3/§7
+   —— 单强调色、克制圆角、玻璃质感、状态/焦点齐全；旧 token 定义保留以便换肤。
+   ============================================================ */
+:root{
+  --tk-bg:#07130d; --tk-bg2:#0b1c14;
+  --tk-surface:rgba(17,36,28,.6); --tk-surface2:rgba(12,28,21,.72);
+  --tk-glass:rgba(9,22,17,.72);
+  --tk-primary:#d7ef83; --tk-primary-fg:#0a1a10;
+  --tk-fg:#eaf3ec; --tk-fg2:#b9cfc2; --tk-muted-fg:#9fb8ac;
+  --tk-border:rgba(255,255,255,.11); --tk-border2:rgba(255,255,255,.18);
+  --tk-ring:rgba(215,239,131,.5); --tk-destruct:#e85555;
+  --acc-dyn: var(--tk-primary);
+  --cyan: var(--tk-primary);       /* 单一强调色：柠檬绿 */
+}
+/* 页面基底：深绿 + 绿色系的柔光（保留毛玻璃/扫描细纹氛围） */
+body{
+  background-color: var(--tk-bg);
+  background-image:
+    radial-gradient(1100px 640px at 12% -10%, rgba(110, 220, 120, 0.08), transparent 58%),
+    radial-gradient(900px 560px at 94% 6%, rgba(215, 239, 131, 0.05), transparent 60%),
+    radial-gradient(760px 620px at 50% 112%, rgba(60, 140, 90, 0.06), transparent 62%),
+    linear-gradient(180deg, color-mix(in srgb, var(--tk-bg) 84%, #123426) 0%, transparent 48%);
+  background-attachment: fixed;
+}
+/* 侧栏 / 卡片 / 指标 / 折叠组：深绿玻璃 */
+[data-testid="stSidebar"] > div{
+  background: linear-gradient(180deg, rgba(13,28,20,.78), rgba(8,19,13,.86));
+  border-right-color: var(--tk-border);
+}
+.panel, .floating-card, .fx-card, [data-testid="stMetric"],
+[data-testid="stExpander"] details, .panel-row, .telemetry-metric{
+  background: var(--tk-surface);
+  border-color: var(--tk-border);
+}
+.panel::before{ background: linear-gradient(90deg, transparent, rgba(215,239,131,.55) 32%, rgba(120,190,140,.35) 82%, transparent); }
+.weather-chip, .pr-pill{
+  border-color: rgba(215,239,131,.35);
+  background: rgba(14,30,22,.72);
+}
+.weather-chip, .fresh-kicker, .panel-title, .live-dot, .telemetry-metric strong, code{
+  color: var(--tk-primary); text-shadow: 0 0 14px rgba(215,239,131,.35);
+}
+/* 主行动按钮：实心柠檬绿（§7 filled primary） */
+button[kind="primary"]{
+  background: linear-gradient(180deg, #e7f8a6, #d7ef83 46%, #bcdd5c) !important;
+  color: var(--tk-primary-fg) !important;
+  border: 1px solid #d7ef83 !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.55), 0 0 16px rgba(215,239,131,.22) !important;
+}
+button[kind="primary"]:hover{
+  background: linear-gradient(180deg, #effbc0, #e2f795 46%, #cde878) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.6), 0 0 26px rgba(215,239,131,.4) !important;
+}
+button[kind="primary"]:active{ filter: brightness(.97); }
+/* 步进器：完成=柠檬绿填充，连线渐变绿；当前/错误用强调环 */
+.fx-step.done .node{
+  border-color: rgba(215,239,131,.8); color: var(--tk-primary-fg);
+  background: linear-gradient(135deg, #d7ef83, #a9cf63);
+  box-shadow: 0 0 14px rgba(215,239,131,.4);
+}
+.fx-step.done .bar::after{ background: linear-gradient(90deg, rgba(215,239,131,.9), rgba(110,190,120,.7)); }
+.fx-step.active .node{
+  border-color: rgba(215,239,131,.8); color: var(--tk-primary);
+  background: rgba(215,239,131,.1);
+  box-shadow: 0 0 0 5px rgba(215,239,131,.12), 0 0 18px rgba(215,239,131,.3);
+}
+.fx-step.done .cap{ color: var(--tk-primary); }
+.fx-step.error .node{ border-color: rgba(232,85,85,.8); color:#ffb0a0; background: rgba(232,85,85,.14); }
+.fx-stepper-meta .meta-pill b, .fx-card .t{ color: var(--tk-primary); }
+/* 运行状态胶囊点与遥测值随强调色 */
+[data-testid="stMetricValue"]{ color: var(--tk-primary) !important; text-shadow: 0 0 2px rgba(215,239,131,.6), 0 0 16px rgba(215,239,131,.28); }
+.telemetry-log{ border-color: rgba(215,239,131,.22); border-left-color: rgba(215,239,131,.6); }
+/* tabs 激活 / select 聚焦环 / 文本输入聚焦：统一柠檬绿 */
+[data-testid="stTabs"] button[role="tab"][aria-selected="true"]{
+  color: var(--tk-primary) !important; background: rgba(215,239,131,.12) !important;
+  box-shadow: inset 0 0 0 1px rgba(215,239,131,.4), 0 0 12px rgba(215,239,131,.14) !important;
+}
+.stTextInput input:focus, .stTextArea textarea:focus, .stNumberInput input:focus{
+  border-color: rgba(215,239,131,.75); box-shadow: 0 0 0 3px rgba(215,239,131,.15), 0 0 14px rgba(215,239,131,.12);
+}
+.stButton > button:not([kind="primary"]):hover, .stButton > button{
+  border-color: rgba(215,239,131,.45); color: var(--tk-primary);
+}
+[data-testid="stSelectbox"]:focus-within > div{ border-color: rgba(215,239,131,.7) !important; }
+/* popover 弹层同步深绿玻璃 */
+[data-testid="stPopoverBody"]{
+  background: rgba(13,27,20,.98); border-color: rgba(215,239,131,.3);
+}
 </style>
 """
 
