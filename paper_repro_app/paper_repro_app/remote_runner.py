@@ -454,7 +454,8 @@ class RemoteRunner:
         requires_dataset = bool(configured_run_command or self.auto_run)
         # auto 模式（系统自动推断训练）下数据集缺失时允许降级为安全检查，任务不因此失败
         degrade_on_missing = bool(self.auto_run and not configured_run_command)
-        if requires_dataset and self.task.get("auto_download_dataset", True):
+        _repo_managed = data_config in {"__repo_managed__", "repo-managed", "skip-dataset"}
+        if requires_dataset and self.task.get("auto_download_dataset", True) and not _repo_managed:
             dataset_step = (
                 f"cd {shlex.quote(f'{self.remote_workdir}/repo')} && "
                 f"{conda_bootstrap}; "
