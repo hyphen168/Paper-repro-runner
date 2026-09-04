@@ -743,6 +743,68 @@ button[kind="primary"]:active{ filter: brightness(.97); }
 [data-testid="stPopoverBody"]{
   background: rgba(13,27,20,.98); border-color: rgba(215,239,131,.3);
 }
+
+/* ============================================================
+   Dark-glass 加强层（用户指定：深色玻璃质感优先）
+   玻璃 = 更低透明度 + 更强背景模糊/饱和 + 顶部高光 + 内侧细描边 + 底侧微反射
+   ============================================================ */
+.panel, .floating-card, [data-testid="stMetric"], .fx-card,
+[data-testid="stExpander"] details, .telemetry-metric, .panel-row{
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.085), rgba(255,255,255,.02) 40%, rgba(255,255,255,0) 62%),
+    linear-gradient(120deg, rgba(170,225,190,.07), rgba(170,225,190,0) 46%),
+    rgba(10,22,16,.5);
+  border-color: rgba(255,255,255,.14);
+  -webkit-backdrop-filter: blur(22px) saturate(165%) brightness(1.04);
+  backdrop-filter: blur(22px) saturate(165%) brightness(1.04);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.12), inset 0 -12px 18px rgba(0,0,0,.12),
+              inset 0 0 0 .5px rgba(255,255,255,.035), 0 2px 6px rgba(0,0,0,.26), 0 16px 38px rgba(0,0,0,.34);
+}
+.panel:hover, .floating-card:hover, .fx-card:hover,
+[data-testid="stMetric"]:hover, [data-testid="stExpander"] details:hover, .panel-row:hover{
+  border-color: rgba(215,239,131,.55);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.2), inset 0 0 0 .5px rgba(215,239,131,.08),
+              0 2px 8px rgba(0,0,0,.3), 0 22px 46px rgba(0,0,0,.4), 0 0 24px rgba(215,239,131,.12);
+}
+/* 侧栏：通透玻璃面 */
+[data-testid="stSidebar"] > div{
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.012) 34%, rgba(255,255,255,0) 60%),
+    linear-gradient(180deg, rgba(15,32,22,.62), rgba(8,19,13,.82));
+  -webkit-backdrop-filter: blur(26px) saturate(170%) brightness(1.04);
+  backdrop-filter: blur(26px) saturate(170%) brightness(1.04);
+  box-shadow: inset -1px 0 0 rgba(255,255,255,.06);
+}
+/* 头部胶囊/遥测 pill/步进 meta：小玻璃珠 */
+.weather-chip, .pr-pill, .meta-pill{
+  background: linear-gradient(180deg, rgba(255,255,255,.09), rgba(255,255,255,.02) 45%, rgba(255,255,255,0)),
+              rgba(12,26,18,.46);
+  border-color: rgba(255,255,255,.16);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  backdrop-filter: blur(14px) saturate(160%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.14), 0 2px 10px rgba(0,0,0,.28);
+}
+.weather-chip:hover{ border-color: rgba(215,239,131,.6); }
+/* 次级按钮：玻璃钮（主按钮保持实心柠檬绿，形成强弱主次） */
+.stButton > button:not([kind="primary"]), div[data-testid="stFormSubmitButton"] button:not([kind="primary"]){
+  background: linear-gradient(180deg, rgba(255,255,255,.09), rgba(255,255,255,.02) 46%, rgba(255,255,255,0)),
+              rgba(10,22,16,.38);
+  border-color: rgba(255,255,255,.2);
+  color: var(--tk-primary);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.14), 0 1px 4px rgba(0,0,0,.25);
+}
+.stButton > button:not([kind="primary"]):hover, div[data-testid="stFormSubmitButton"] button:not([kind="primary"]):hover{
+  border-color: rgba(215,239,131,.65);
+  background: linear-gradient(180deg, rgba(255,255,255,.13), rgba(255,255,255,.03) 46%, rgba(255,255,255,0)),
+              rgba(12,26,18,.5);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.2), 0 0 18px rgba(215,239,131,.18);
+}
+/* 玻璃兜底（无 backdrop-filter 支持时给更实底色保底可读） */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .panel, .floating-card, .fx-card, [data-testid="stMetric"],
+  [data-testid="stExpander"] details, .panel-row, .telemetry-metric, .meta-pill,
+  .weather-chip, .pr-pill { background: rgba(9,18,13,.92) !important; }
+}
 </style>
 """
 
