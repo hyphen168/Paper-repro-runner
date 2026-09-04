@@ -1,2 +1,9 @@
 PaperReproRunner-*.zip
 PaperReproRunner-*-使用说明.txt
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+src/*.egg-info/
