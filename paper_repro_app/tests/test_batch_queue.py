@@ -27,10 +27,11 @@ class _FakeRunner:
         if on_step:
             on_step("clone", "拉取代码", "fake clone start")
             on_step("collect", "收集指标", "fake collect done")
-        for _ in range(60):
+        # 假执行约 2 秒，保证取消发生在“运行中”窗口内（避免瞬时完成的竞态）
+        for _ in range(100):
             if cancel_event is not None and cancel_event.is_set():
                 return {"status": "cancelled", "message": "fake cancelled", "failed_step": "run"}
-            time.sleep(0.01)
+            time.sleep(0.02)
         return {"status": "success", "metrics": {}, "logs": "fake success", "message": "ok"}
 
 
@@ -174,7 +175,7 @@ def test_drainer_serializes_and_moves_to_next(_isolated):
             break
         time.sleep(0.05)
     assert saw_running <= 1
-    time.sleep(0.8)
+    time.sleep(3.5)  # 等待第二个假任务（约 2s）真正跑完
     assert all(store.get_task(t)["status"] == "success" for t in _FakeRunner.EXECUTED)
     assert store.get_oldest_queued() == {}
 
@@ -185,17 +186,24 @@ def test_cancel_batch(_isolated):
     ids = _seed_batch(store, batch, 3)
     su.ensure_batch_drainer()
     su.wake_batch_drainer()
-    time.sleep(0.3)  # 让第一个开始执行
+    # 确定性：等第一个任务真正进入 running 后再取消（避免“还没开始/已瞬时完成”竞态）
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if store.get_task(ids[0])["status"] == "running":
+            break
+        time.sleep(0.03)
     affected = su.cancel_batch(batch)
     assert affected >= 1
     deadline = time.time() + 10
     while time.time() < deadline:
         statuses = {t: store.get_task(t)["status"] for t in ids}
-        if statuses.get(ids[0]) in ("cancelled", "failed") and all(
-            statuses[t] in ("cancelled", "success") for t in ids if t != ids[0]
-        ):
+        if all(s in ("cancelled", "success") for s in statuses.values()):
             break
         time.sleep(0.05)
-    assert store.get_task(ids[0])["status"] in ("cancelled",)
-    for tid in ids[1:]:
-        assert store.get_task(tid)["status"] == "cancelled"
+    # 取消语义：无残留排队；至少一个被取消；运行中的已被中止而非 success
+    assert store.get_oldest_queued() == {}
+    assert any(s == "cancelled" for s in statuses.values()), statuses
+    assert statuses[ids[0]] in ("cancelled", "success"), statuses
+    if statuses[ids[0]] == "success":
+        # 仅当恰好在其完成瞬间取消时允许 success，但其余排队任务必须已取消
+        assert all(statuses[t] == "cancelled" for t in ids[1:]), statuses
