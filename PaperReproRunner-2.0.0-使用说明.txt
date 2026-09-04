@@ -1,49 +1,4 @@
-"""一键打包分发：把应用文件夹清理成纯净可分发状态并压缩为 zip。
-
-运行后会在上级目录生成：
-    PaperReproRunner-<版本>.zip
-    PaperReproRunner-<版本>-使用说明.txt
-
-朋友拿到 zip 后：解压 → 双击 start_app.bat → 等待自动安装 → 浏览器自动打开。
-"""
-from __future__ import annotations
-
-import shutil
-import sys
-import zipfile
-from pathlib import Path
-
-APP_DIR = Path(__file__).resolve().parent
-APP_NAME = APP_DIR.name
-OUT_DIR = APP_DIR.parent
-
-# 打包时排除的运行残留（朋友不需要，还可能带着你的数据）
-ZIP_EXCLUDE_DIRS = {
-    ".venv",
-    "__pycache__",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".git",
-    "logs",
-    "data",
-    "assets",
-    "scripts",
-    "tests",
-}
-ZIP_EXCLUDE_PATTERNS = ("*.egg-info",)
-# 额外剔除：根级临时脚本与桌面快捷方式脚本（纯开发/个人工具）
-ZIP_EXCLUDE_FILES = {
-    "create_desktop_shortcut.py",
-    "requirements-dev.txt",
-}
-_DOCS_KEEP = {"docs", "troubleshoot", "GUIDE.md"}  # 仅保留排障手册
-
-# 本地清理仅移除小型缓存（不碰 .venv/数据/日志，安全快速）
-LOCAL_CLEAN_DIRS = {"__pycache__", ".pytest_cache", "*.egg-info"}
-
-VERSION = "2.0.0"
-
-FRIEND_GUIDE = """============================================================
+============================================================
   Paper Repro Runner（论文复现助手）使用说明（v2.0.0）
 ============================================================
 
@@ -108,7 +63,7 @@ ip-api.com（公网 IP 换粗粒度城市定位）、Open-Meteo（天气与地�
 
 【数据保存在哪里】
 - 所有任务数据、日志、产物都保存在你自己的电脑：
-  C:\\Users\\<你的用户名>\\.paper_repro_app
+  C:\Users\<你的用户名>\.paper_repro_app
 - 应用文件夹本身是纯代码，可随时删除/替换/升级，不影响数据
 - 换电脑时把 .paper_repro_app 文件夹和任务产物目录一起拷走即可迁移
 
@@ -118,93 +73,10 @@ A: 安装 Python 3.11+（勾选 Add python.exe to PATH）后重试。
 
 Q: 依赖安装失败？
 A: 关闭窗口重试即可（自动切换国内镜像）；仍失败可手动执行：
-   .venv\\Scripts\\python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+   .venv\Scripts\python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 Q: 换一篇论文/换一个仓库会影响吗？
 A: 不会。每篇论文独立目录，同名不同仓库自动哈希隔离，互不覆盖。
 
 Q: 如何更新？
 A: 删掉旧应用文件夹，解压新版，双击 start_app.bat。任务历史不受影响。
-"""
-
-
-def clean_tree() -> None:
-    """仅清理小型缓存目录（跳过 .venv/数据，不破坏本地环境）。"""
-    import os
-
-    removed = 0
-    for dirpath, dirnames, _filenames in os.walk(APP_DIR):
-        dirnames[:] = [
-            d
-            for d in dirnames
-            if d not in {".venv", "data", "logs"} and not d.startswith(".git")
-        ]
-        for d in list(dirnames):
-            if d in LOCAL_CLEAN_DIRS or d.endswith(".egg-info"):
-                target = Path(dirpath) / d
-                shutil.rmtree(target, ignore_errors=True)
-                dirnames.remove(d)
-                removed += 1
-    if removed:
-        print(f"[打包] 已清理 {removed} 个缓存目录（__pycache__ 等）")
-
-
-def write_friend_guide() -> Path:
-    guide = OUT_DIR / f"PaperReproRunner-{VERSION}-使用说明.txt"
-    guide.write_text(FRIEND_GUIDE, encoding="utf-8")
-    return guide
-
-
-def make_zip() -> Path:
-    import os
-
-    zip_path = OUT_DIR / f"PaperReproRunner-{VERSION}.zip"
-    files: list[tuple[str, Path]] = []
-    for dirpath, dirnames, filenames in os.walk(APP_DIR):
-        dirnames[:] = [
-            d
-            for d in dirnames
-            if d not in ZIP_EXCLUDE_DIRS
-            and not d.endswith(".egg-info")
-            and not d.startswith(".git")
-        ]
-        for name in filenames:
-            path = Path(dirpath) / name
-            rel = path.relative_to(APP_DIR)
-            parts = rel.parts
-            if any(part.endswith(".egg-info") for part in parts):
-                continue
-            # 剔除根级临时/个人脚本
-            if len(parts) == 1 and (name.startswith("_") or name in ZIP_EXCLUDE_FILES):
-                continue
-            # docs 只保留 docs/troubleshoot/GUIDE.md
-            if parts and parts[0] == "docs":
-                if parts != ("docs", "troubleshoot", "GUIDE.md"):
-                    continue
-            files.append((str(rel), path))
-
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for rel, path in sorted(files):
-            zf.write(path, arcname=f"{APP_NAME}/{rel}")
-        # 使用说明入包顶层（P0-3：只发 zip 也不丢引导）
-        guide = write_friend_guide()
-        zf.write(guide, arcname=f"{APP_NAME}/{guide.name}")
-    return zip_path
-
-
-def main() -> int:
-    print("=" * 60)
-    print("Paper Repro Runner 一键打包分发")
-    print("=" * 60)
-    clean_tree()
-    zip_path = make_zip()
-    guide_path = write_friend_guide()
-    size_mb = zip_path.stat().st_size / 1024 / 1024
-    print(f"[打包] 完成: {zip_path}  ({size_mb:.2f} MB)")
-    print(f"[打包] 使用说明: {guide_path}")
-    print("[打包] 把 zip 和说明一起发给朋友即可（或只发 zip，说明在本文档里）。")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
