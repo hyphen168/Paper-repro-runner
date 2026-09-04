@@ -17,6 +17,7 @@ except Exception:  # pragma: no cover - GUI may not be available in headless env
 
 from paper_repro_app.config_store import LocalConfigStore
 from paper_repro_app.database import TaskStore
+from paper_repro_app.day_night import css_vars_block, now_day_night_vars
 from paper_repro_app.diagnostics import EnvironmentDiagnostics
 from paper_repro_app.log_analyzer import LogAnalyzer
 from paper_repro_app.logging_config import DEFAULT_LOG_FILE, get_logger
@@ -236,6 +237,24 @@ def render_pipeline_steps(task: dict, store: TaskStore) -> None:
         for idx, step in enumerate(steps, start=1):
             st.markdown(f"### {idx}. {step['title']}")
             st.code(step["command"])
+
+
+@st.fragment(run_every=60.0)
+def _day_night_tick() -> None:
+    """每 60 秒按本地太阳位置刷新昼夜 CSS 变量（天空/卡片/辉光随真实时间变化）。"""
+    prev = st.session_state.get("dn_prev")
+    try:
+        vars_now = now_day_night_vars(prev=prev)
+    except Exception:
+        vars_now = None
+    if vars_now:
+        st.session_state["dn_prev"] = {k: vars_now[k] for k in (
+            "day_factor", "sky_top", "sky_mid", "sky_hor", "sun_a", "moon_a",
+            "star_alpha", "glow_c", "glow_m", "glow_y", "card_alpha", "card_bright",
+            "particle_bright")}
+        st.markdown(css_vars_block(vars_now), unsafe_allow_html=True)
+    else:
+        st.session_state.pop("dn_prev", None)
 
 
 # ================= 微调训练参数面板 =================
@@ -486,6 +505,21 @@ def render_app() -> None:
         APP_CSS,
         unsafe_allow_html=True,
     )
+
+    # 首帧立即注入昼夜 CSS 变量（后续每 60s 由 _day_night_tick 刷新）
+    if "dn_boot" not in st.session_state:
+        st.session_state["dn_boot"] = True
+        try:
+            _vars0 = now_day_night_vars()
+            st.markdown(css_vars_block(_vars0), unsafe_allow_html=True)
+            st.session_state["dn_prev"] = {k: _vars0[k] for k in (
+                "day_factor", "sky_top", "sky_mid", "sky_hor", "sun_a", "moon_a",
+                "star_alpha", "glow_c", "glow_m", "glow_y", "card_alpha", "card_bright",
+                "particle_bright")}
+        except Exception:
+            pass
+    else:
+        _day_night_tick()
 
     weather_info = describe(get_weather())
     weather_chip = ""
