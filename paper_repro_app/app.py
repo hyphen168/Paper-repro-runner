@@ -146,6 +146,17 @@ def open_directory_dialog(default_path: str) -> str:
     return base_dir
 
 
+def pick_local_dir_callback(initial_dir: str) -> None:
+    """目录选择 on_click 回调：Streamlit 在回调阶段尚未实例化控件，此时写入控件 key 合法，
+    保存后界面会自动回显所选路径。"""
+    chosen = open_directory_dialog(initial_dir or str(Path.home() / "paper_repro_data"))
+    if chosen:
+        # 控件自身 key（local_data_dir_input）＋ 提交用的备份 key
+        st.session_state["local_data_dir_input"] = chosen
+        st.session_state["selected_local_data_dir"] = chosen
+        st.session_state["_picked_dir_toast"] = chosen
+
+
 # —— 失败映射：关键词 -> (错误码, 结论, 动作, 手册锚点)（排障规范 v1.0 三段式）——
 _FAILURE_MAP = [
     (("CUDA", "cuda", "Torch not compiled"), "E_TORCH_CPU",
@@ -1249,15 +1260,16 @@ def render_app() -> None:
                 st.session_state[storage_state_key] = local_data_dir
                 if local_data_dir.strip() and os.path.abspath(local_data_dir.strip()) != os.path.abspath(str(Path.home() / "paper_repro_data")):
                     st.caption(f"📁 产物将保存在：{os.path.abspath(local_data_dir.strip())}")
+            _picked_toast = st.session_state.pop("_picked_dir_toast", None)
+            if _picked_toast:
+                st.toast("本地输出目录已设为：" + str(_picked_toast))
             with action_col:
-                if st.button("选择目录…", key="choose_local_storage", use_container_width=True, help="打开系统目录选择器（PowerShell 原生窗口，支持新建文件夹）"):
-                    selected = open_directory_dialog(st.session_state.get(storage_state_key, storage_default))
-                    if selected:
-                        # 同时更新输入框自身 key：否则 Streamlit 控件状态不会回显新路径
-                        st.session_state["local_data_dir_input"] = selected
-                        st.session_state[storage_state_key] = selected
-                        st.toast("本地输出目录已设为：" + selected)
-                        st.rerun()
+                st.button(
+                    "选择目录…", key="choose_local_storage", use_container_width=True,
+                    help="打开系统目录选择器（PowerShell 原生窗口，支持新建文件夹）",
+                    on_click=pick_local_dir_callback,
+                    args=(st.session_state.get(storage_state_key, storage_default),),
+                )
 
         # ============ 卡片 1：论文与云端（必填） ============
         with st.container(border=True):
