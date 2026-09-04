@@ -23,6 +23,8 @@ from paper_repro_app.report_generator import generate_repro_report
 # ================= G3 + P0-1：stdout 指标兜底与论文基准对比 =================
 _STDOUT_METRIC_PATTERNS = [
     ("test_acc_pct", r"Accuracy of the network on the 10000 test images:\s*([\d.]+)\s*%", 1),
+    ("test_acc_pct", r"Test set:.*?Accuracy:\s*([\d.]+)\s*%", 1),
+    ("test_acc_pct", r"Accuracy:\s*([\d.]+)\s*%", 1),
     ("loss_d", r"Loss_D:\s*([\d.eE+-]+)\s+Loss_G:\s*([\d.eE+-]+)", 1),
     ("loss_g", r"Loss_D:\s*([\d.eE+-]+)\s+Loss_G:\s*([\d.eE+-]+)", 2),
     ("d_fake", r"D\(G\(z\)\):\s*([\d.eE+-]+)", 1),

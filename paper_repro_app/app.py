@@ -105,6 +105,70 @@ def render_particle_background() -> None:
         components.html(build_particles_html(weather, override=(info["kind"], info["is_day"])), height=0, scrolling=False)
 
 
+
+
+def _render_success_result(result: dict, task_meta: str = "") -> None:
+    """成功任务结果展示：结果说明行 + 指标卡 + 论文对比表 + 报告链接（监控/历史共用）。"""
+    analysis = result.get("analysis") or {}
+    report = result.get("report") or {}
+    comparison_table = result.get("comparison_table") or ""
+    metrics = result.get("metrics") or {}
+    ds = result.get("dataset") or {}
+    verdict = result.get("metric_verdict") or ""
+    stdout_metrics = result.get("stdout_metrics") or {}
+
+    # —— 结果说明行（静默失败等于失败：degrade/空指标/训练未发生都明示）——
+    notes = []
+    if ds.get("degraded"):
+        notes.append("本次未执行训练（数据集降级为安全检查）")
+    elif not metrics:
+        notes.append("训练已完成但未收集到指标文件")
+    if verdict == "no_metrics_output":
+        notes.append("日志中亦未匹配到精度/损失输出（可能仓库输出格式未识别，见报告）")
+    if stdout_metrics:
+        notes.append(f"已从训练日志解析 {len(stdout_metrics)} 项指标（stdout 兜底）")
+    if notes:
+        st.warning("结果说明：" + "；".join(notes))
+    else:
+        st.success("复现训练已完成，指标与论文对比见下。")
+
+    if metrics:
+        st.markdown("#### 训练指标")
+        prefer_order = ["map", "precision", "recall", "f1", "accuracy", "acc", "loss"]
+        keys = sorted(metrics.keys(), key=lambda k: next((i for i, t in enumerate(prefer_order) if t in k.lower()), 99))
+        cols = st.columns(min(4, len(keys)))
+        for idx, key in enumerate(keys):
+            with cols[idx % len(cols)]:
+                st.metric(key.strip(), f"{metrics[key]:.6g}" if isinstance(metrics[key], (int, float)) else str(metrics[key]))
+    elif ds.get("degraded"):
+        st.warning("本次任务**未执行训练**：仓库无匹配数据集配置（已自动降级为安全检查）。")
+        st.caption("需要训练请在「提交任务」→ 高级选项中填写数据集 YAML/直链（如 https://…/coco128.zip），或改用自定义命令模式。")
+
+    if comparison_table:
+        st.markdown("#### 论文指标对比（复现 vs 原文）")
+        st.markdown(comparison_table)
+    if task_meta:
+        st.caption(task_meta)
+
+    with st.expander("复现结果报告", expanded=True):
+        if report.get("report_path"):
+            st.success(f"复现报告已生成：{report['report_path']}")
+        st.markdown("#### 创新点分析")
+        st.metric("分析置信度", f"{analysis.get('confidence', 0):.2f}")
+        st.write(analysis.get("summary") or "")
+        for item in analysis.get("possible_innovations") or []:
+            st.markdown(f"- {item}")
+        if analysis.get("risks"):
+            st.markdown("**主要风险**")
+            for item in analysis["risks"]:
+                st.markdown(f"- {item}")
+    if ds and not ds.get("degraded"):
+        with st.expander("数据集信息", expanded=False):
+            st.json(ds)
+    ps = result.get("project_summary") or ""
+    if ps:
+        with st.expander("GitHub-ready 项目总结", expanded=False):
+            st.code(ps)
 def render_repro_progress(task: dict | None) -> None:
     steps = get_step_order()
     current = (task or {}).get("current_step") or "prepare"
@@ -434,47 +498,7 @@ def _render_monitor_content(task_id: str) -> None:
             result = payload or {}
 
             if status == "success":
-                analysis = result.get("analysis") or {}
-                report = result.get("report") or {}
-                comparison_table = result.get("comparison_table") or ""
-                project_summary = result.get("project_summary") or ""
-
-                # —— 训练指标卡：有指标直接展示；未训练（降级/安全模式）明确提示 ——
-                metrics = result.get("metrics") or {}
-                ds = result.get("dataset") or {}
-                if metrics:
-                    st.markdown("#### 训练指标")
-                    prefer_order = ["map", "precision", "recall", "f1", "accuracy", "loss"]
-                    keys = sorted(metrics.keys(), key=lambda k: next((i for i, t in enumerate(prefer_order) if t in k.lower()), 99))
-                    cols = st.columns(min(4, len(keys)))
-                    for idx, key in enumerate(keys):
-                        with cols[idx % len(cols)]:
-                            st.metric(key.strip(), f"{metrics[key]:.6g}" if isinstance(metrics[key], (int, float)) else str(metrics[key]))
-                elif ds.get("degraded"):
-                    st.warning("本次任务**未执行训练**：仓库无匹配数据集配置（已自动降级为安全检查）。")
-                    st.caption("需要训练请在「提交任务」→ 高级选项中填写数据集 YAML（如 data/coco128.yaml）或改用自定义/微调模式。")
-                else:
-                    st.info("本次为安全检查模式，未执行训练，故无训练指标。")
-
-                with st.expander("复现结果报告", expanded=True):
-                    if report.get("report_path"):
-                        st.success(f"复现报告已生成：{report['report_path']}")
-                    st.markdown("#### 创新点分析")
-                    st.metric("分析置信度", f"{analysis.get('confidence', 0):.2f}")
-                    st.write(analysis.get("summary") or "")
-                    for item in analysis.get("possible_innovations") or []:
-                        st.markdown(f"- {item}")
-                    if analysis.get("risks"):
-                        st.markdown("**主要风险**")
-                        for item in analysis["risks"]:
-                            st.markdown(f"- {item}")
-                    st.markdown("#### 指标对比")
-                    st.markdown(comparison_table or "（暂无实验对比数据）")
-                if result.get("dataset"):
-                    with st.expander("自动发现的数据集", expanded=True):
-                        st.json(result["dataset"])
-                with st.expander("GitHub-ready 项目总结", expanded=False):
-                    st.code(project_summary or "（暂无）")
+                _render_success_result(result, task_meta=f"任务 {result.get('task_id') or current_task.get('id')} · 仓库 {current_task.get('repo_url') or ''}")
             elif status == "failed":
                 fail_message = (result.get("message") or str(current_task.get("log") or ""))[:3000]
                 st.error(f"任务执行失败：{fail_message}")
@@ -1056,6 +1080,14 @@ def render_app() -> None:
                     st.code(diag["error_snippet"], language="text")
                     st.markdown(f"**根因分析:** {diag['cause']}")
                     st.markdown(f"**推荐解决方案:** {diag['suggestion']}")
+            elif status == "success":
+                try:
+                    _payload = json.loads(str(task.get("log") or "{}"))
+                except (json.JSONDecodeError, TypeError):
+                    _payload = {}
+                if isinstance(_payload, dict) and _payload.get("comparison_table"):
+                    with st.expander(f"复现结果与论文对比 [{task['id']}]", expanded=False):
+                        _render_success_result(_payload, task_meta=f"仓库 {task.get('repo_url') or ''} · 完成时间见任务记录")
 
         with st.expander("查看后台系统日志文件 (app.log)", expanded=False):
             if DEFAULT_LOG_FILE.exists():
