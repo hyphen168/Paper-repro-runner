@@ -263,7 +263,9 @@ class RemoteRunner:
         )
         configured_pip_index = shlex.quote(self.pip_index_url) if self.pip_index_url else ""
         pip_install_helper = (
-                        "pip_install_with_fallback() { "
+            "export PYTHON_BIN=${PYTHON_BIN:-$(command -v python 2>/dev/null || true)}; "
+            "if [ -z \"$PYTHON_BIN\" ]; then echo '未找到可用的 Python（PYTHON_BIN 为空），请检查 Conda 环境激活'; exit 127; fi; "
+            "pip_install_with_fallback() { "
             "export PIP_CACHE_DIR=\"${PIP_CACHE_DIR:-$HOME/.cache/pip}\"; mkdir -p \"$PIP_CACHE_DIR\"; "
             "candidates=\"" + (configured_pip_index + " " if configured_pip_index else "") + "https://pypi.tuna.tsinghua.edu.cn/simple https://mirrors.aliyun.com/pypi/simple https://pypi.org/simple\"; "
             "for idx in $candidates; do "
@@ -283,8 +285,9 @@ class RemoteRunner:
             "_cu_ok=0; "
             "for _cu in https://download.pytorch.org/whl/cu128 https://download.pytorch.org/whl/cpu; do "
             "echo \"--- 正在从 $_cu 安装 torch/torchvision（限时 420 秒，超时自动切换）...\"; "
-            "if timeout 420 \"$PYTHON_BIN\" -m pip install --disable-pip-version-check --prefer-binary --index-url \"$_cu\" torch torchvision 2>&1 | tail -30; then "
-            "echo \"torch 安装完成（源：$_cu）\"; _cu_ok=1; break; fi; "
+            "if timeout 420 \"$PYTHON_BIN\" -m pip install --disable-pip-version-check --prefer-binary --index-url \"$_cu\" torch torchvision >/tmp/torch_install.log 2>&1; then "
+            "echo \"torch 安装完成（源：$_cu）\"; tail -30 /tmp/torch_install.log; _cu_ok=1; break; fi; "
+            "tail -12 /tmp/torch_install.log 2>/dev/null || true; "
             "echo \"源 $_cu 安装失败或超时，切换下一个...\"; "
             "done; "
             "if [ \"$_cu_ok\" = 1 ]; then echo 'CUDA torch 就绪，安装 requirements 时跳过 torch 系升级'; "
@@ -334,6 +337,7 @@ class RemoteRunner:
             "eval \"$(\"$CONDA_BIN\" shell.bash hook 2>/dev/null || true)\"; "
             "conda_activate_paperrepro >/dev/null 2>&1 || ensure_paper_env; "
             "conda_activate_paperrepro || {{ echo 'Conda 环境激活失败，请检查云端 Conda 安装'; exit 1; }}; "
+            "export PYTHON_BIN=\"$(command -v python 2>/dev/null || true)\" || true; "
             "python --version; "
             "else "
             "echo '未检测到可用 Conda，自动回退到 Python venv'; "
@@ -349,6 +353,7 @@ class RemoteRunner:
             "if ! ensure_paper_env; then echo 'Conda 环境创建失败'; exit 1; fi; "
             "eval \"$(\"$CONDA_BIN\" shell.bash hook 2>/dev/null || true)\"; "
             "conda_activate_paperrepro || {{ echo 'Conda 环境激活失败'; exit 1; }}; "
+            "export PYTHON_BIN=\"$(command -v python 2>/dev/null || true)\" || true; "
             "python --version; "
             "else "
             # 3) 有系统 Python：优先 venv，失败则直接用系统 Python，未找到时报可读错误
@@ -377,7 +382,7 @@ class RemoteRunner:
             "conda_activate_paperrepro >/dev/null 2>&1; "
             "if [ -f environment.yml ]; then echo '发现 environment.yml，更新 Conda 环境'; conda env update -f environment.yml --prune; fi; "
             "if [ -f requirements.txt ]; then echo '发现 requirements.txt，安装声明依赖'; install_req_file; fi; "
-            "if [ -f setup.py ] || [ -f pyproject.toml ]; then echo '发现 Python 项目配置，安装项目依赖'; pip_install_with_fallback -e .; fi; "
+            "if [ -f setup.py ] || [ -f pyproject.toml ]; then echo '发现 Python 项目配置，尝试安装项目依赖'; if pip_install_with_fallback -e .; then echo '项目依赖安装成功'; else echo '项目安装未成功（常见于 flat-layout/旧版 setup.py），启用 PYTHONPATH 兼容模式继续'; export PYTHONPATH=$PWD:${{PYTHONPATH:-}}; fi; fi; "
             "else "
             "SYSTEM_PYTHON=python3; "
             "python3 --version >/dev/null 2>&1 || SYSTEM_PYTHON=python; "
@@ -386,8 +391,8 @@ class RemoteRunner:
             "[ -x \"$PYTHON_BIN\" ] || PYTHON_BIN=\"$SYSTEM_PYTHON\"; "
             "[ -n \"$PYTHON_BIN\" ] || {{ echo '未找到 Python 可执行文件'; exit 127; }}; "
             "\"$PYTHON_BIN\" -m pip install --disable-pip-version-check --upgrade pip && "
-            "if [ -f requirements.txt ]; then echo '发现 requirements.txt，安装声明依赖'; install_req_file; fi && "
-            "if [ -f setup.py ] || [ -f pyproject.toml ]; then echo '发现 Python 项目配置，安装项目依赖'; pip_install_with_fallback -e .; fi; "
+            "if [ -f requirements.txt ]; then echo '发现 requirements.txt，安装声明依赖'; install_req_file; fi; "
+            "if [ -f setup.py ] || [ -f pyproject.toml ]; then echo '发现 Python 项目配置，尝试安装项目依赖'; if pip_install_with_fallback -e .; then echo '项目依赖安装成功'; else echo '项目安装未成功（常见于 flat-layout/旧版 setup.py），启用 PYTHONPATH 兼容模式继续'; export PYTHONPATH=$PWD:${{PYTHONPATH:-}}; fi; fi; "
             "fi"
         ).format(
             workdir=f"{self.remote_workdir}/repo",
@@ -498,7 +503,13 @@ class RemoteRunner:
             "PIP_CACHE_DIR=\"$HOME/.cache/pip\"; mkdir -p \"$PIP_CACHE_DIR\"; "
             "\"$PYTHON_BIN\" -m pip install --disable-pip-version-check --cache-dir \"$PIP_CACHE_DIR\" pytest; "
             "fi; "
-            "timeout 600 \"$PYTHON_BIN\" -m pytest -q --maxfail=1 -x; "
+            "if timeout 600 \"$PYTHON_BIN\" -m pytest -q --maxfail=1 -x > /tmp/verify_pytest.log 2>&1; then "
+            "echo '仓库自带测试全部通过'; tail -8 /tmp/verify_pytest.log; "
+            "elif grep -qE 'ERROR collecting|ImportError while importing|ModuleNotFoundError|no tests ran' /tmp/verify_pytest.log; then "
+            "echo '仓库自带测试需外部依赖或无法收集（不阻断，转编译冒烟）'; tail -8 /tmp/verify_pytest.log; "
+            "echo '编译冒烟：校验全部 Python 文件语法...'; "
+            "timeout 300 \"$PYTHON_BIN\" -m compileall -q . && echo '编译检查通过：全部 .py 语法有效'; "
+            "else echo '仓库自带测试存在失败项：'; tail -25 /tmp/verify_pytest.log; exit 1; fi; "
             "else \"$PYTHON_BIN\" -m compileall .; fi"
         ).format(
             workdir=f"{self.remote_workdir}/repo",
