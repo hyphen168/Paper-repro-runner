@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -79,7 +80,80 @@ def _write_cache(data: dict) -> None:
         pass
 
 
+CITY_FILE = Path.home() / ".paper_repro_app" / "weather_city.json"
+
+
+def _read_city_pref() -> Optional[dict]:
+    """读取手动设置的城市（含已解析坐标）。"""
+    try:
+        data = json.loads(CITY_FILE.read_text(encoding="utf-8"))
+        if data.get("lat") and data.get("lon") and data.get("city"):
+            return data
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def get_manual_city() -> str:
+    """当前手动城市名（未设置返回空串）。"""
+    pref = _read_city_pref()
+    return pref["city"] if pref else ""
+
+
+def _geocode(city: str) -> Optional[dict]:
+    try:
+        resp = requests.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": city, "count": 1, "language": "zh", "format": "json"},
+            timeout=HTTP_TIMEOUT,
+        )
+        results = resp.json().get("results") or []
+        if not results:
+            return None
+        r = results[0]
+        return {"city": r.get("name") or city, "lat": float(r["latitude"]), "lon": float(r["longitude"])}
+    except Exception:
+        return None
+
+
+def set_manual_city(name: str) -> tuple:
+    """手动指定所在城市（解析坐标并存偏好，清天气缓存强制刷新）。成功返回 (True, 规范名)。"""
+    name = (name or "").strip()
+    if not name:
+        return False, "城市名为空"
+    loc = _geocode(name)
+    if not loc:
+        return False, f"未找到城市：{name}"
+    try:
+        CITY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CITY_FILE.write_text(json.dumps(loc, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        return False, "偏好写入失败"
+    _clear_cache()
+    return True, loc["city"]
+
+
+def clear_manual_city() -> None:
+    """清除手动城市，回落 IP 自动定位。"""
+    try:
+        CITY_FILE.unlink()
+    except OSError:
+        pass
+    _clear_cache()
+
+
+def _clear_cache() -> None:
+    try:
+        CACHE_FILE.unlink()
+    except OSError:
+        pass
+
+
 def _fetch_location() -> Optional[dict]:
+    # 优先：用户手动指定的城市（这才是“当地”）
+    pref = _read_city_pref()
+    if pref:
+        return {"lat": pref["lat"], "lon": pref["lon"], "city": pref["city"]}
     try:
         resp = requests.get(
             "http://ip-api.com/json/?fields=status,lat,lon,city,countryCode",

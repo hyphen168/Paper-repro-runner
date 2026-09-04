@@ -532,6 +532,8 @@ def render_app() -> None:
     else:
         _day_night_tick()
 
+    # store 供头部状态胶囊与后续共用（提前实例化，避免胶囊空转）
+    store = TaskStore(DATA_DB_PATH)
     weather_info = describe(get_weather())
     weather_chip = ""
     if weather_info.get("temp") is not None:
@@ -553,22 +555,21 @@ def render_app() -> None:
         _pill = ""
     rise = "rise-in" if st.session_state.get("dn_rise_done") is None else ""
     st.session_state["dn_rise_done"] = True
-    st.markdown(
-        f"""
-        <div class="fresh-header">
-            <div class="{rise}">
-                <div class="fresh-kicker">Paper Repro Runner<span class="kb-cursor"></span></div>
-                <h1 style="margin: 0.15rem 0; font-size: clamp(1.9rem, 3.5vw, 2.6rem);">论文复现助手</h1>
-                <div class="fresh-sub">本地轻量控制端 · 云端计算执行器</div>
-            </div>
-            <div class="header-cluster">
-                {_pill}
-                {weather_chip}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    # 顶格拼接（行首零缩进）：避免 markdown 把缩进 HTML 行解析成代码块
+    header_lines = [
+        "<div class='fresh-header'>",
+        f"<div class='brand-zone {rise}'>",
+        "<div class='fresh-kicker'>Paper Repro Runner<span class='kb-cursor'></span></div>",
+        "<h1 style='margin:0.15rem 0;font-size:clamp(1.9rem,3.5vw,2.6rem);'>论文复现助手</h1>",
+        "<div class='fresh-sub'>本地轻量控制端 · 云端计算执行器</div>",
+        "</div>",
+        "<div class='header-cluster'>",
+        _pill,
+        weather_chip,
+        "</div>",
+        "</div>",
+    ]
+    st.markdown(chr(10).join(header_lines), unsafe_allow_html=True)
 
     st.markdown(build_carousel_html(), unsafe_allow_html=True)
 
@@ -577,7 +578,6 @@ def render_app() -> None:
     # 背景粒子流最后渲染：iframe 占位不干扰顶部头部
     render_particle_background()
 
-    store = TaskStore(DATA_DB_PATH)
     config_store = LocalConfigStore()
     saved = config_store.load()
 
@@ -594,6 +594,35 @@ def render_app() -> None:
             st.info(f"当前任务：{st.session_state['task_id']}")
 
         st.markdown("---")
+        st.markdown("##### 当地定位与天气")
+        from paper_repro_app.weather_fx import (
+            WEATHER_PREVIEWS, clear_manual_city, get_manual_city, set_manual_city,
+        )
+        _manual_city = get_manual_city()
+        if _manual_city:
+            st.caption(f"当地：{_manual_city}（手动设定，天气与昼夜均按此）")
+        _city_input = st.text_input(
+            "所在城市（天气/昼夜/明暗氛围按此计算；留空则 IP 自动）",
+            value=_manual_city or "",
+            placeholder="例如：上海 / 杭州 / 广州 / Chengdu",
+            key="city_input",
+            label_visibility="collapsed",
+        )
+        _c1, _c2 = st.columns(2)
+        with _c1:
+            if st.button("设为当地", key="city_save", use_container_width=True):
+                _ok, _msg = set_manual_city(_city_input)
+                if _ok:
+                    st.session_state["wx_preview"] = "auto"
+                    st.rerun()
+                else:
+                    st.warning(_msg)
+        with _c2:
+            if st.button("IP 自动", key="city_auto", use_container_width=True):
+                clear_manual_city()
+                st.session_state["wx_preview"] = "auto"
+                st.rerun()
+
         st.markdown("##### 背景天气预览")
         from paper_repro_app.weather_fx import WEATHER_PREVIEWS
         _wx_opts = list(WEATHER_PREVIEWS.keys())
