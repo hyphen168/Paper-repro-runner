@@ -142,6 +142,67 @@ def clear_manual_city() -> None:
     _clear_cache()
 
 
+def parse_browser_loc(loc: str):
+    """解析浏览器定位参数 "lat,lon"；非法返回 None。"""
+    try:
+        text = str(loc or "").strip()
+        if not text or "," not in text:
+            return None
+        parts = [p.strip() for p in text.split(",")]
+        if len(parts) != 2:
+            return None
+        lat, lon = float(parts[0]), float(parts[1])
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            return None
+        return lat, lon
+    except (TypeError, ValueError):
+        return None
+
+
+def _reverse_city(lat: float, lon: float) -> str:
+    """反向地理编码（尽力而为）：坐标 → 中文城市名；失败返回空串。
+
+    使用无需密钥的 BigDataCloud reverse-geocode-client，短超时、失败静默。
+    """
+    try:
+        resp = requests.get(
+            "https://api.bigdatacloud.net/data/reverse-geocode-client",
+            params={"latitude": lat, "longitude": lon, "localityLanguage": "zh"},
+            timeout=HTTP_TIMEOUT,
+            headers={"User-Agent": "paper-repro-runner/1.0"},
+        )
+        data = resp.json() or {}
+        return str(data.get("city") or data.get("locality") or "").strip()
+    except Exception:
+        return ""
+
+
+def set_browser_city(lat: float, lon: float) -> tuple:
+    """以浏览器定位（GPS/WiFi，远比 IP 归属精确）设定“当地”。
+
+    反向解析不出城市名时降级为坐标标签；写入城市偏好并清天气缓存强制刷新。
+    返回 (是否成功, 显示名)。
+    """
+    try:
+        lat_f, lon_f = float(lat), float(lon)
+        if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
+            return False, "经纬度越界"
+    except (TypeError, ValueError):
+        return False, "经纬度无效"
+    city = _reverse_city(lat_f, lon_f)
+    label = city or f"GPS({lat_f:.2f}, {lon_f:.2f})"
+    try:
+        CITY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CITY_FILE.write_text(
+            json.dumps({"city": label, "lat": lat_f, "lon": lon_f, "source": "browser"},
+                        ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        return False, "偏好写入失败"
+    _clear_cache()
+    return True, label
+
 def _clear_cache() -> None:
     try:
         CACHE_FILE.unlink()
@@ -150,22 +211,38 @@ def _clear_cache() -> None:
 
 
 def _fetch_location() -> Optional[dict]:
-    # 优先：用户手动指定的城市（这才是“当地”）
+    # 优先：用户手动指定的城市 / 浏览器 GPS 定位（这才是“当地”）
     pref = _read_city_pref()
     if pref:
         return {"lat": pref["lat"], "lon": pref["lon"], "city": pref["city"]}
-    try:
-        resp = requests.get(
-            "http://ip-api.com/json/?fields=status,lat,lon,city,countryCode",
-            timeout=HTTP_TIMEOUT,
-            headers={"User-Agent": "paper-repro-runner/1.0"},
-        )
-        data = resp.json()
-        if data.get("status") != "success" or not data.get("lat") or not data.get("lon"):
-            return None
-        return {"lat": data["lat"], "lon": data["lon"], "city": data.get("city", "")}
-    except Exception:
-        return None
+    # IP 自动定位：https 双源。注意 IP 归属通常是宽带/运营商出口城市（如北京），
+    # 与物理所在地（如贵阳）可能不一致——这是 GeoIP 固有误差，建议手动/GPS 校准。
+    providers = [
+        ("https://ipwho.is/", {}),
+        ("http://ip-api.com/json/?fields=status,message,lat,lon,city,regionName,countryCode",
+         {"headers": {"User-Agent": "paper-repro-runner/1.0"}}),
+    ]
+    for url, extra in providers:
+        try:
+            resp = requests.get(url, timeout=HTTP_TIMEOUT, **extra)
+            data = resp.json() or {}
+            lat = data.get("lat") or data.get("latitude")
+            lon = data.get("lon") or data.get("longitude")
+            if data.get("success") is False or not lat or not lon:
+                continue
+            city = data.get("city") or ""
+            region = data.get("region") or data.get("regionName") or ""
+            city = str(city).strip()
+            if city:
+                region = str(region or "").strip()
+                # 中文省/市名可能形如“贵州省”/“Guizhou”：仅当城市名缺省时借用区域名
+                if not city and region:
+                    city = region
+            return {"lat": float(lat), "lon": float(lon), "city": city,
+                    "source": url.split("//")[1].split("/")[0]}
+        except Exception:
+            continue
+    return None
 
 
 def _approx_utc_offset_seconds(lon) -> Optional[int]:

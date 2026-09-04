@@ -54,7 +54,7 @@ from paper_repro_app.ssh_utils import parse_ssh_config as parse_ssh_config  # no
 from paper_repro_app.ssh_utils import parse_ssh_target as parse_ssh_target  # noqa: F401
 from paper_repro_app.task_utils import estimate_completion as estimate_completion  # noqa: F401
 
-from paper_repro_app.weather_fx import build_particles_html, describe, get_weather
+from paper_repro_app.weather_fx import build_particles_html, describe, get_weather, parse_browser_loc
 
 logger = get_logger("paper_repro_app")
 
@@ -92,34 +92,6 @@ def open_directory_dialog(default_path: str) -> str:
     selected = askdirectory(initialdir=base_dir, title="选择本地存储目录")
     root.destroy()
     return selected or base_dir
-
-
-
-
-
-def render_particle_background() -> None:
-    """天气粒子背景：默认跟随当地实时天气；侧边栏可切预览覆盖。"""
-    try:
-        weather = get_weather()
-    except Exception:
-        weather = None
-    info = describe(weather)
-    # 昼夜同源：优先用昼夜系统的实时太阳判定（含天气-城市时区），避免天气缓存 30 分钟滞后
-    _dn_day = st.session_state.get("dn_day")
-    if _dn_day is not None:
-        info["is_day"] = bool(_dn_day)
-    preview = st.session_state.get("wx_preview", "auto")
-    if preview and preview != "auto":
-        # 预览覆盖：映射为 (kind, is_day)
-        info["kind"], info["is_day"] = preview.split(":") if ":" in preview else (preview, True)
-    # 新版 Streamlit: st.iframe 替代已弃用的 st.components.v1.html
-    if hasattr(st, "iframe"):
-        st.iframe(build_particles_html(weather, override=(info["kind"], info["is_day"])), height=1)
-    else:
-        components.html(build_particles_html(weather, override=(info["kind"], info["is_day"])), height=0, scrolling=False)
-
-
-
 
 
 # —— 失败映射：关键词 -> (错误码, 结论, 动作, 手册锚点)（排障规范 v1.0 三段式）——
@@ -415,6 +387,115 @@ def apply_task_state(task_id: str, status: str, current_step: str, message: str)
     render_repro_progress({"status": status, "current_step": current_step})
 
 
+
+
+def render_particle_background() -> None:
+    """天气粒子背景：默认跟随当地实时天气；侧边栏可切预览覆盖。
+
+    注意：新版 st.iframe 的沙箱 iframe 不允许脚本触碰父文档（画布需注入父文档），
+    会导致背景/预览不显示；因此始终走 components.html（可访问父文档注入画布）。
+    """
+    try:
+        weather = get_weather()
+    except Exception:
+        weather = None
+    info = describe(weather)
+    # 昼夜同源：优先用昼夜系统的实时太阳判定（含天气-城市时区），避免天气缓存 30 分钟滞后
+    _dn_day = st.session_state.get("dn_day")
+    if _dn_day is not None:
+        info["is_day"] = bool(_dn_day)
+    preview = st.session_state.get("wx_preview", "auto")
+    if preview and preview != "auto":
+        # 预览覆盖：key 形如 "clear:1" / "rain"；把昼夜值正确转 bool（"0"/false 为夜）
+        _kv = preview.split(":")
+        info["kind"] = _kv[0]
+        _day_txt = _kv[1] if len(_kv) > 1 else "1"
+        info["is_day"] = str(_day_txt).lower() not in ("0", "false")
+    _html = build_particles_html(weather, override=(info["kind"], info["is_day"]))
+    try:
+        components.html(_html, height=0, scrolling=False)
+    except Exception:
+        try:  # 极新版本若移除了 components.html 再退化到 iframe（个别环境仍可显示）
+            if hasattr(st, "iframe"):
+                st.iframe(_html, height=1)
+        except Exception:
+            pass
+
+
+def _apply_browser_location_query() -> bool:
+    """处理浏览器定位回传 ?loc=lat,lon：持久化为“当地”并移除参数。返回是否已应用。"""
+    try:
+        loc = st.query_params.get("loc")
+        if isinstance(loc, list):
+            loc = loc[-1] if loc else ""
+        parsed = parse_browser_loc(str(loc or ""))
+        if parsed is None:
+            return False
+        lat, lon = parsed
+        # 已有手动城市时不静默覆盖（用户意图优先）
+        from paper_repro_app.weather_fx import get_manual_city as _gmc, set_browser_city as _sbc
+        if _gmc():
+            try:
+                del st.query_params["loc"]
+            except Exception:
+                pass
+            return False
+        ok, label = _sbc(lat, lon)
+        try:
+            del st.query_params["loc"]
+        except Exception:
+            pass
+        if ok:
+            st.toast(f"已按浏览器定位设定当地：{label}（此后天气/昼夜/当地时刻都按它计算）")
+            st.session_state["wx_preview"] = "auto"
+            st.rerun()
+        return ok
+    except Exception:
+        return False
+
+
+def _geo_prompt_html() -> str:
+    """浏览器精确定位提示脚本：仅在组件 iframe（可访问父文档）内生效；
+    cookie 去重避免反复询问；失败静默回落 IP。"""
+    lines = [
+        "<script>",
+        "(function(){try{",
+        "var force=false;try{force=/[?&]geoask=1/.test(window.top.location.search);}catch(e){}",
+        "if(!force&&document.cookie.indexOf('pr_geo_asked=1')>=0){return;}",
+        "var mark=function(){try{document.cookie='pr_geo_asked=1;max-age=2592000;path=/';}catch(e){}};",
+        "if(!navigator.geolocation){mark();return;}",
+        "navigator.geolocation.getCurrentPosition(function(p){",
+        "mark();",
+        "try{var q=new URLSearchParams(window.top.location.search);",
+        "q.set('loc',p.coords.latitude.toFixed(5)+','+p.coords.longitude.toFixed(5));",
+        "window.top.location.search=q.toString();}catch(e){}",
+        "},function(){mark();},{timeout:9000,maximumAge:600000});",
+        "}catch(e){}})();",
+        "</script>",
+    ]
+    return "".join(lines)
+
+
+def _maybe_ask_browser_geolocation() -> None:
+    """首次运行（无手动城市）时静默请求一次浏览器定位；侧栏按钮可强制（?geoask=1）。"""
+    try:
+        if os.environ.get("PAPER_REPRO_EXPOSE", ""):
+            return  # 远程访问不弹定位（手机/平板隐私）
+        from paper_repro_app.weather_fx import get_manual_city as _gmc
+        if _gmc():
+            return
+        try:
+            if st.query_params.get("loc"):
+                return
+        except Exception:
+            pass
+        if not st.session_state.get("geo_force") and st.session_state.get("geo_asked"):
+            return
+        st.session_state["geo_asked"] = True
+        components.html(_geo_prompt_html(), height=0, scrolling=False)
+        st.session_state.pop("geo_force", None)
+    except Exception:
+        pass
 
 
 def render_pipeline_steps(task: dict, store: TaskStore) -> None:
@@ -817,6 +898,7 @@ def _collect_batch_chart_points(tasks: list) -> list:
 def render_app() -> None:
     st.set_page_config(page_title="论文复现助手", layout="wide")
     _access_gate()
+    _apply_browser_location_query()
     st.markdown(
         APP_CSS,
         unsafe_allow_html=True,
@@ -891,6 +973,8 @@ def render_app() -> None:
 
     # 背景粒子流最后渲染：iframe 占位不干扰顶部头部
     render_particle_background()
+    # 首次运行且未设手动城市时，静默请求一次浏览器定位（?geoask=1 强制；远端模式不弹）
+    _maybe_ask_browser_geolocation()
 
     config_store = LocalConfigStore()
     saved = config_store.load()
@@ -1013,18 +1097,23 @@ def render_app() -> None:
             WEATHER_PREVIEWS, clear_manual_city, get_manual_city, set_manual_city,
         )
         _manual_city = get_manual_city()
+        st.caption("当地时刻/天气/昼夜都按你设置或定位到的地点计算。")
         if _manual_city:
-            st.caption(f"当地：{_manual_city}（手动设定，天气与昼夜均按此）")
+            st.caption(f"✅ 当前当地：{_manual_city}（手动/GPS 设定，优先于 IP）")
+        else:
+            st.caption("⚠️ 当前用 IP 自动定位——IP 归属解析的是宽带出口城市（常显示为 北京 等），"
+                       "不是你的物理位置。请在下方输入你的城市（如 贵阳）后点「设为当地」，"
+                       "或点「浏览器定位」用 GPS 精确校准。")
         _city_input = st.text_input(
             "所在城市（天气/昼夜/明暗氛围按此计算；留空则 IP 自动）",
             value=_manual_city or "",
-            placeholder="例如：上海 / 杭州 / 广州 / Chengdu",
+            placeholder="例如：贵阳 / 北京 / 上海 / Chengdu",
             key="city_input",
             label_visibility="collapsed",
         )
-        _c1, _c2 = st.columns(2)
+        _c1, _c2, _c3 = st.columns(3)
         with _c1:
-            if st.button("设为当地", key="city_save", use_container_width=True):
+            if st.button("设为当地", key="city_save", use_container_width=True, help="把上面输入的城市（如贵阳）设为当地"):
                 _ok, _msg = set_manual_city(_city_input)
                 if _ok:
                     st.session_state["wx_preview"] = "auto"
@@ -1032,9 +1121,22 @@ def render_app() -> None:
                 else:
                     st.warning(_msg)
         with _c2:
+            if st.button("浏览器定位", key="city_geo", use_container_width=True,
+                         help="用浏览器 GPS/WiFi 定位你所在城市（比 IP 准确），首次会请求浏览器授权"):
+                st.session_state["geo_force"] = True
+                try:
+                    st.query_params["geoask"] = "1"
+                except Exception:
+                    pass
+                st.rerun()
+        with _c3:
             if st.button("IP 自动", key="city_auto", use_container_width=True):
                 clear_manual_city()
                 st.session_state["wx_preview"] = "auto"
+                try:
+                    del st.query_params["geoask"]
+                except Exception:
+                    pass
                 st.rerun()
 
         st.markdown("##### 背景天气预览")
