@@ -4,7 +4,12 @@
     {
       "id": "resnet20_cifar10",
       "family": "image_classification",
-      "keywords": ["resnet", "cifar", "pytorch-cifar", "pytorch_cifar"],
+      "keywords": [
+        "resnet",
+        "cifar",
+        "pytorch-cifar",
+        "pytorch_cifar"
+      ],
       "title": "ResNet (Deep Residual Learning, He et al. 2016)",
       "level": "L1",
       "caliber": "CIFAR-10（训练 50k/测试 10k）；复现口径：200 epochs（论文表注 164 epochs，差轮见报告口径节）",
@@ -12,7 +17,10 @@
         {
           "metric_label": "测试误差 (%)",
           "metric_key": "test_error_pct",
-          "derive": {"from": "test_acc_pct", "op": "100-x"},
+          "derive": {
+            "from": "test_acc_pct",
+            "op": "100-x"
+          },
           "paper_value": 8.75,
           "unit": "%",
           "direction": "lower",
@@ -24,7 +32,11 @@
     {
       "id": "yolov5_coco128",
       "family": "object_detection",
-      "keywords": ["yolov5", "ultralytics/yolov5", "coco128"],
+      "keywords": [
+        "yolov5",
+        "ultralytics/yolov5",
+        "coco128"
+      ],
       "title": "YOLOv5 (Jocher et al., ultralytics/yolov5)",
       "level": "L3",
       "caliber": "coco128 演示集（128 张）；与论文 COCO val2017 全量口径不可直接对比，仅结构判据 + 官方 tutorial 同配置参照",
@@ -36,15 +48,18 @@
           "paper_value": 0.287,
           "unit": "",
           "direction": "higher",
-          "source": "ultralytics/yolov5 官方 Tutorial（coco128, 3 epochs；commit 执行期回填）",
-          "note": "verify-on-cloud：执行期抓取 README/tutorial 留存出处后回填 commit"
+          "source": "ultralytics/yolov5 官方 Tutorial（coco128, 3 epochs）",
+          "note": "verify-on-cloud：执行期抓取 README/tutorial 留存出处后回填 commit（数值为官方教程/README 基线快照，见随包说明）"
         }
       ]
     },
     {
       "id": "mnist_cnn",
       "family": "image_classification",
-      "keywords": ["mnist", "pytorch/examples"],
+      "keywords": [
+        "mnist",
+        "pytorch/examples"
+      ],
       "title": "MNIST CNN（pytorch/examples 官方 mnist 示例）",
       "level": "L3",
       "caliber": "MNIST 60k/10k；14 epochs；示例实现与 LeNet-5 非同构，LeCun 表值仅背景",
@@ -56,8 +71,8 @@
           "paper_value": 99.0,
           "unit": "%",
           "direction": "higher",
-          "source": "pytorch/examples mnist README（约 99%；commit 执行期回填）",
-          "note": "LeCun et al. 1998 原 LeNet-5 0.95% 误差为背景注记，不作对比宣称"
+          "source": "pytorch/examples mnist README（约 99%）",
+          "note": "LeCun et al. 1998 原 LeNet-5 0.95% 误差为背景注记，不作对比宣称（数值为官方教程/README 基线快照，见随包说明）"
         }
       ]
     }

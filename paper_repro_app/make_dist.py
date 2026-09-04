@@ -22,21 +22,50 @@ ZIP_EXCLUDE_DIRS = {
     ".venv",
     "__pycache__",
     ".pytest_cache",
+    ".ruff_cache",
     ".git",
     "logs",
     "data",
     "assets",
+    "scripts",
+    "tests",
+    "docs",
 }
 ZIP_EXCLUDE_PATTERNS = ("*.egg-info",)
+# 额外剔除：根级临时脚本与桌面快捷方式脚本（纯开发/个人工具）
+ZIP_EXCLUDE_FILES = {
+    "create_desktop_shortcut.py",
+    "requirements-dev.txt",
+}
+_DOCS_KEEP = {"docs", "troubleshoot", "GUIDE.md"}  # 仅保留排障手册
 
 # 本地清理仅移除小型缓存（不碰 .venv/数据/日志，安全快速）
 LOCAL_CLEAN_DIRS = {"__pycache__", ".pytest_cache", "*.egg-info"}
 
-VERSION = "1.5.0"
+VERSION = "2.0.0"
 
 FRIEND_GUIDE = """============================================================
-  Paper Repro Runner（论文复现助手）使用说明
+  Paper Repro Runner（论文复现助手）使用说明（v2.0.0）
 ============================================================
+
+【本版新增 v2.0.0】
+- 实时天气与昼夜明暗主题（本地真实天气驱动整体界面氛围）
+- SSH 自动连接：多台候选自动选用可达者；粘贴整行 ssh 登录指令/别名/私钥均可自动识别
+- 换论文自适应：粘贴新论文链接即可跑；同一仓库第二次提交自动预填上次成功配置
+- 复现结果与论文对比可见：训练指标卡、复现 vs 论文对比表（带口径级别）、结果说明与证据日志
+- 自助排障：失败诊断卡（错误码+建议动作+可复制诊断摘要）、侧栏速查、完整排障手册（解压目录 docs/troubleshoot/GUIDE.md）
+- 云端健壮性：CUDA torch 自动重装、依赖多源与预算、数据集 URL 直链自动解压与配置生成
+
+【网络与隐私】
+本工具为本地单机应用，无账号、无遥测、无后台回传。运行时请求以下第三方服务完成定位与加速：
+ip-api.com（公网 IP 换粗粒度城市定位）、Open-Meteo（天气与地理编码）、GitHub/Gitee/arXiv（论文仓库检索）、
+清华/阿里等 pip 镜像（测速择优）、download.pytorch.org（CUDA PyTorch）、ghfast.top（GitHub 加速）——
+云端下载均在您自己的云服务器上发起。凭据安全：云服务器密码只保存在本机进程内存（重启即失效），
+不落盘、不进日志、不入安装包；粘贴私钥保存在本机 ~/.ssh/ 目录。日志输出已脱敏。
+提醒：数据集直链若携带签名 token 会随下载日志明文显示，请使用短期签名链接。
+许可：本工具 MIT 协议；依赖库均宽松许可（paramiko 为 LGPL-2.1，经 pip 安装使用）；
+天气数据与昼夜算法来自 Open-Meteo 与 NOAA 公开模型；公开数据集请核对各自原始许可。
+仅供研究与学习用途；复现指标与论文数值对比口径见任务报告级别注记。
 
 【这是什么】
 一个本地运行的论文复现工具：输入论文链接 → 自动找代码仓库 →
@@ -143,8 +172,16 @@ def make_zip() -> Path:
         for name in filenames:
             path = Path(dirpath) / name
             rel = path.relative_to(APP_DIR)
-            if any(part.endswith(".egg-info") for part in rel.parts):
+            parts = rel.parts
+            if any(part.endswith(".egg-info") for part in parts):
                 continue
+            # 剔除根级临时/个人脚本
+            if len(parts) == 1 and (name.startswith("_") or name in ZIP_EXCLUDE_FILES):
+                continue
+            # docs 只保留 docs/troubleshoot/GUIDE.md
+            if parts and parts[0] == "docs":
+                if parts != ("docs", "troubleshoot", "GUIDE.md"):
+                    continue
             files.append((str(rel), path))
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:

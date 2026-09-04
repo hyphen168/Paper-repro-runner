@@ -8,4 +8,4 @@ beautifulsoup4==4.15.0
 PyYAML==6.0.3
 paramiko==5.0.0
 pydantic==2.13.5
-pytest==9.1.1
+# pytest==9.1.1  # dev-only（分发版不安装）

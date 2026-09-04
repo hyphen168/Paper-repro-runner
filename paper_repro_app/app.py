@@ -167,9 +167,22 @@ def _render_failure_card(task_id: str, message: str, diag: dict, raw_result: str
         f"任务 {task_id}\n错误码 {code or '未知'}\n结论：{conclusion}\n建议：{action}\n"
         f"详情：{(diag.get('cause') or message or '')[:800]}"
     )
-    st.button("复制诊断摘要", key=f"diag_copy_{task_id}",
-              help="复制后可直接粘贴给朋友或 AI 助手寻求帮助。")
+    st.code(diag_text, language="text")
+    st.caption("诊断摘要已在上方生成：选中文本复制，可粘贴给朋友或 AI 助手。")
     st.session_state[f"diag_text_{task_id}"] = diag_text
+    if code == "E_MODEL_ENTRY":
+        try:
+            from paper_repro_app.repo_profiles import get_for_repo as _gfr
+            _rp_url = st.session_state.get(f"repo_url_{task_id}") or ""
+            _prof = _gfr(_rp_url) if _rp_url else None
+        except Exception:
+            _prof = None
+        _prev_cmd = (_prof or {}).get("run_command") or ""
+        if st.button("填入提交页修改命令", key=f"fix_entry_{task_id}"):
+            st.session_state["run_mode_radio"] = "run"
+            st.session_state["rp_fill"] = {"run_command": _prev_cmd, "data_config": ""}
+            st.session_state["rp_hint_msg"] = "已按上次成功命令预填（可编辑），请切换到「提交任务」页确认后提交。"
+            st.rerun()
 
 
 def _render_success_result(result: dict, task_meta: str = "") -> None:
@@ -568,6 +581,7 @@ def _render_monitor_content(task_id: str) -> None:
                 fail_message = (result.get("message") or str(current_task.get("log") or ""))[:3000]
                 log_analyzer = LogAnalyzer()
                 diag = log_analyzer.analyze_log(json.dumps(result, ensure_ascii=False) or fail_message)
+                st.session_state[f"repo_url_{current_task.get('id')}"] = str(current_task.get("repo_url") or "")
                 _render_failure_card(
                     str(current_task.get("id") or "task"),
                     fail_message,
@@ -687,7 +701,7 @@ def render_app() -> None:
 - **提示未训练/无指标**：任务详情会写明原因——没填数据集时在高级选项填 YAML 或数据直链
 - **报 CUDA/CPU torch 错误**：重新执行任务会自动重装 CUDA 版
 - **报缺少 Python 包**：重新执行即可（本次会中断并列出缺包）
-- **识别不到训练入口**：选「实际运行」模式粘贴仓库 README 的训练命令
+- **识别不到训练入口**：失败详情有「填入提交页修改命令」按钮，或选「实际运行」粘贴 README 训练命令
 - **换新论文怎么跑**：直接粘论文链接；仓库识别不出时手动填仓库地址即可，流程全自动
 - **数据在哪**：本机数据在用户目录 .paper_repro_app 与应用数据目录，应用文件夹可随时删除重装
 - 详细手册见应用目录 docs/troubleshoot/GUIDE.md"""
@@ -829,6 +843,7 @@ def render_app() -> None:
                 index=0,
                 horizontal=True,
                 label_visibility="collapsed",
+                key="run_mode_radio",
             )
 
             # 仓库档案建议（同一仓库第二次跑：秒配）
@@ -846,6 +861,8 @@ def render_app() -> None:
                     st.rerun()
             _rp_fill = st.session_state.pop("rp_fill", None) if "rp_fill" in st.session_state else None
             _fill_cmd = (_rp_fill or {}).get("run_command", "") if _rp_fill else ""
+            if st.session_state.pop("rp_hint_msg", None):
+                st.info(st.session_state.get("rp_hint_msg", "已填入配置，请检查后提交。"))
             if run_mode == "run":
                 run_command = st.text_area(
                     "训练或推理命令",

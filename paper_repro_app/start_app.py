@@ -269,9 +269,6 @@ def open_browser(url: str, port: int) -> None:
     try:
         webbrowser.open(url, new=2, autoraise=True)
         _log(f"已打开浏览器: {url}")
-        for ip in get_local_ips():
-            if ip != "127.0.0.1":
-                _log(f"同网段手机/平板访问: http://{ip}:{port}")
     except Exception as exc:  # pragma: no cover
         _log(f"未能自动打开浏览器（不影响使用，手动访问 {url}）: {exc}")
 
@@ -288,9 +285,8 @@ def start_app() -> None:
     url = f"http://127.0.0.1:{port}"
 
     _log(f"应用启动中: {url}")
-    open_browser(url, port)
-
-    subprocess.run(
+    # P0-3：先起服务并等待端口就绪（≤20s）再打开浏览器，避免"无法访问此网站"
+    proc = subprocess.Popen(
         [
             str(PYTHON_EXE),
             "-m",
@@ -300,13 +296,32 @@ def start_app() -> None:
             "--server.headless",
             "true",
             "--server.address",
-            "0.0.0.0",
+            "127.0.0.1",
             "--server.port",
             str(port),
         ],
         cwd=str(APP_DIR),
-        check=False,
     )
+    deadline = time.time() + 20
+    ready = False
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            break
+        if is_port_in_use(port):
+            ready = True
+            break
+        time.sleep(0.4)
+    if ready:
+        _log("服务已就绪，打开浏览器...")
+        open_browser(url, port)
+    else:
+        _log("服务启动失败或超时（20s 内未就绪）。")
+    # P0-2：阻塞等待并检查退出码，非 0 打印中文原因（窗口不闪退由 bat 的 pause 保证）
+    rc = proc.wait()
+    if rc != 0:
+        _log(f"应用进程异常退出（退出码 {rc}）。")
+        _log("排查：1) 查看上方日志定位具体错误；2) 可手动运行 .venv\\Scripts\\python -m streamlit run app.py 查看完整报错；3) 或删除 .venv 文件夹后重新双击 start_app.bat 重建环境。")
+        raise SystemExit(rc)
 
 
 if __name__ == "__main__":

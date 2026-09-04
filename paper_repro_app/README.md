@@ -245,3 +245,12 @@ git push -u origin master
 - 应用侧栏「遇到问题？先看这里」
 - 排障手册：docs/troubleshoot/GUIDE.md
 - 任务失败卡片可一键「复制诊断摘要」
+
+## 网络与隐私
+
+本工具为本地单机应用：无账号、无遥测、无后台回传。运行时会请求 ip-api.com（IP 粗定位）、Open-Meteo（天气/地理编码）、GitHub/arXiv（论文检索）、国内 pip 镜像与 download.pytorch.org（依赖与 CUDA torch）、ghfast.top（GitHub 加速）等第三方服务完成定位与下载加速；其中云端下载均在您自己的云服务器上发起。云服务器密码仅存进程内存（重启失效），不落盘、不入日志、不入安装包；粘贴私钥仅存本机 ~/.ssh/；日志已脱敏。数据集直链若携带签名 token 会随日志明文显示，请使用短期签名链接。许可：MIT（依赖均宽松许可，paramiko LGPL-2.1 经 pip 使用）；仅供研究与学习用途。
+
+## 文档
+
+- 排障手册：docs/troubleshoot/GUIDE.md（应用侧栏「遇到问题？先看这里」有速查）
+- 使用说明随发布 zip 顶层附带（含本版新增、服务器填写三步、隐私声明）
