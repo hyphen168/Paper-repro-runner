@@ -55,6 +55,13 @@ FRIEND_GUIDE = """============================================================
 - 自助排障：失败诊断卡（错误码+建议动作+可复制诊断摘要）、侧栏速查、完整排障手册（解压目录 docs/troubleshoot/GUIDE.md）
 - 云端健壮性：CUDA torch 自动重装、依赖多源与预算、数据集 URL 直链自动解压与配置生成
 
+【手机使用（可选）】
+- 同一 WiFi：双击 start_app_remote.bat → 手机浏览器打开控制台显示的 http://电脑IP:8505
+- 免口令直达：首次输入访问口令后勾选「信任此设备」，把带 ?tk= 的地址存入书签/添加到主屏
+- 人在外面：双击 start_tunnel.bat（自动 SSH 反隧到你的云服务器），配合云平台公网映射
+- 开机自启：管理员运行 autostart_install.bat（卸除用 autostart_uninstall.bat）
+- 详细步骤与排查见解压目录 docs/troubleshoot/GUIDE.md（G-8 手机使用）
+
 【网络与隐私】
 本工具为本地单机应用，无账号、无遥测、无后台回传。运行时请求以下第三方服务完成定位与加速：
 ip-api.com（公网 IP 换粗粒度城市定位）、Open-Meteo（天气与地理编码）、GitHub/Gitee/arXiv（论文仓库检索）、
