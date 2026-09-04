@@ -17,7 +17,7 @@ except Exception:  # pragma: no cover - GUI may not be available in headless env
 
 from paper_repro_app.config_store import LocalConfigStore
 from paper_repro_app.database import TaskStore
-from paper_repro_app.day_night import bg_color_for, css_vars_block, now_day_night_vars
+from paper_repro_app.day_night import ambient_vars, css_vars_block, now_day_night_vars
 from paper_repro_app.diagnostics import EnvironmentDiagnostics
 from paper_repro_app.log_analyzer import LogAnalyzer
 from paper_repro_app.logging_config import DEFAULT_LOG_FILE, get_logger
@@ -197,24 +197,23 @@ def render_pipeline_steps(task: dict, store: TaskStore) -> None:
         current = store.get_task(task["id"]) if task.get("id") else None
         status = str((current or {}).get("status") or ("running" if running else "idle")).lower()
         label_map = {
-            "queued": ("排队中", "var(--amber)"),
-            "running": ("运行中", "#3e9d89"),
-            "success": ("已完成", "#3e9d89"),
-            "failed": ("⛔ 执行失败", "var(--red)"),
-            "cancelled": ("⏹ 已结束", "var(--muted)"),
-            "idle": ("等待任务开始", "var(--muted)"),
-            "unknown": ("状态未知", "var(--muted)"),
+            "queued": "排队中", "running": "运行中", "success": "已完成",
+            "failed": "执行失败", "cancelled": "已结束",
+            "idle": "等待任务开始", "unknown": "状态未知",
         }
-        label, color = label_map.get(status, label_map["unknown"])
+        label = label_map.get(status, label_map["unknown"])
+        color = get_status_color(status)  # 状态色单源
         if running:
             started_at = state.get("started_at")
             elapsed = int((datetime.now() - started_at).total_seconds()) if started_at else 0
             label = f"运行中 · 已执行 {elapsed // 60} 分 {elapsed % 60} 秒"
-        dot = "<span class='live-dot'></span>" if status == "running" else ""
+        dot = ("<span class='live-dot'></span>" if status == "running"
+               else f"<span class='status-dot' style='background: {color};'></span>")
         st.markdown(
-            f"<div style='border: 1px solid rgba(77,171,151,0.3); border-radius: 12px; padding: 0.6rem 0.9rem; "
-            f"margin-bottom: 0.6rem; background: rgba(255,255,255,0.85); transition: box-shadow 0.25s ease;'>"
-            f"<span style='color: {color}; font-weight: 800; letter-spacing: 0.08em;'>{dot}{label}</span>"
+            f"<div style='border: 1px solid rgba(0, 240, 255, 0.25); border-radius: 12px; padding: 0.6rem 0.9rem; "
+            f"margin-bottom: 0.6rem; background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(9,13,26,0.55));"
+            f"backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);'>"
+            f"<span style='color: {color}; font-weight: 800; letter-spacing: 0.05em;'>{dot}{label}</span>"
             f"<span style='color: var(--muted); font-size: 0.78rem; margin-left: 0.8rem;'>当前步骤："
             f"<span style='color: var(--amber);'>{(current or {}).get('current_step') or 'prepare'}</span></span>"
             f"</div>",
@@ -244,14 +243,13 @@ def render_pipeline_steps(task: dict, store: TaskStore) -> None:
 
 
 def _dn_sample_with_weather(prev=None) -> dict:
-    """背景亮度：天气明度系数 × 昼夜因子 → 单色插值（背景不单独配色）。"""
+    """氛围采样：昼夜 × 天气 → 全套主题 token（玻璃/描边/霓虹/文字/背景 12+ 维度联动）。"""
     vars_now = now_day_night_vars(prev=prev)
     try:
         kind = describe(get_weather()).get("kind") or ""
     except Exception:
         kind = ""
-    vars_now["bg_color"] = bg_color_for(kind, vars_now["day_factor"])
-    return vars_now
+    return ambient_vars(vars_now, kind)
 
 
 def _dn_persist(vars_now: dict) -> None:
@@ -269,10 +267,8 @@ def _day_night_tick() -> None:
         vars_now = None
     if vars_now:
         _dn_persist(vars_now)
-        st.markdown(f"<style>:root {{ --bg-color: {vars_now['bg_color']}; }}</style>",
-                    unsafe_allow_html=True)
-    else:
-        st.session_state.pop("dn_prev", None)
+        st.markdown(css_vars_block(vars_now), unsafe_allow_html=True)
+    # 异常/无结果：静默保留上一组注入值（防闪回深宵默认）
 
 
 # ================= 微调训练参数面板 =================
@@ -530,8 +526,7 @@ def render_app() -> None:
         try:
             _vars0 = _dn_sample_with_weather()
             _dn_persist(_vars0)
-            st.markdown(f"<style>:root {{ --bg-color: {_vars0['bg_color']}; }}</style>",
-                        unsafe_allow_html=True)
+            st.markdown(css_vars_block(_vars0), unsafe_allow_html=True)
         except Exception:
             pass
     else:
@@ -942,10 +937,10 @@ def render_app() -> None:
             repo_short = (task.get("repo_url") or "未填写仓库").rsplit("/", 1)[-1][:46]
             st.markdown(
                 (
-                    "<div class='panel' style='padding: 0.7rem 0.9rem; margin: 0.45rem 0;'>"
+                    "<div class='panel-row' style='padding: 0.7rem 0.9rem; margin: 0.45rem 0;'>"
                     f"<div style='display: flex; justify-content: space-between; gap: 0.8rem; flex-wrap: wrap; align-items: center;'>"
                     f"<div><span class='status-dot' style='background: {status_color};'></span>"
-                    f"<b style='color: #2b6e5c;'>{task['id']}</b>"
+                    f"<b style='color: var(--text-strong);'>{task['id']}</b>"
                     f"<span style='color: var(--muted); font-size: 0.78rem; margin-left: 0.55rem;'>{status_label}</span>"
                     f"<span style='color: var(--muted); font-size: 0.72rem; margin-left: 0.55rem;'>当前: {task.get('current_step', 'queued')}</span></div>"
                     f"<span style='color: var(--muted); font-size: 0.72rem;'>{repo_short}</span>"

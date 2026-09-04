@@ -53,7 +53,11 @@ def test_fresh_theme_css():
     assert "fx-stepper" in APP_CSS, "步进器样式缺失"
     assert "fx-carousel" in APP_CSS, "轮播样式缺失"
     assert "backdrop-filter" in APP_CSS, "毛玻璃缺失"
-    assert "nodePulse" in APP_CSS, "霓虹节点动画缺失"
+    # 专家组规范：轮询区零重放动画 —— 步进节点用静态光晕，不再有 infinite 动画
+    assert "@keyframes nodePulse" not in APP_CSS and "@keyframes badgePulse" not in APP_CSS
+    assert "animation: nodePulse" not in APP_CSS, "轮询区禁止重放动画"
+    assert "rgba(255, 206, 0, 0.12), 0 0 18px" in APP_CSS or "0 0 0 5px rgba(255, 206, 0, 0.12)" in APP_CSS, "静态光环缺失"
+    assert "var(--amb-card" in APP_CSS, "氛围变量消费缺失"
     assert "z-index: 1" in APP_CSS, "内容层分离缺失"
     # 内容层在粒子之上的排版保障
     assert 'section[data-testid="stMain"]' in APP_CSS and "position: relative" in APP_CSS

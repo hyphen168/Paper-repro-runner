@@ -308,6 +308,12 @@ def css_vars_block(v: dict) -> str:
         f"--glow-c:{v['glow_c']:.2f};--glow-m:{v['glow_m']:.2f};--glow-y:{v['glow_y']:.2f};"
         f"--card-alpha:{v['card_alpha']:.2f};--card-bright:{v['card_bright']:.0f}%;"
         f"--particle-bright:{v['particle_bright']:.2f};"
+        f"--bg-color:{v.get('bg_color', '#0A1120')};"
+        f"--amb-card:{v.get('amb_card', 0.50):.2f};--amb-line:{v.get('amb_line', 0.10):.3f};"
+        f"--amb-hi:{v.get('amb_hi', 0.045):.3f};--amb-glow:{v.get('amb_glow', 1.0):.2f};"
+        f"--amb-acc:{v.get('amb_acc', '#00f0ff')};--amb-mag:{v.get('amb_mag', '#ff2a6d')};"
+        f"--txt-2:{v.get('txt2', '#8fa3c7')};--txt-3:{v.get('txt3', '#5c6f96')};"
+        f"--scan-a:{v.get('scan_a', 0.011):.4f};"
         "}</style>"
     )
 
@@ -358,3 +364,33 @@ def bg_color_for(kind: str, day_factor: float) -> str:
     coef = _WEATHER_LIFT.get(kind, 0.9)
     p = clamp(coef * max(0.0, min(1.0, day_factor)), 0.0, 0.9)
     return mix_hex(_BG_BASE, _BG_LIGHT, p)
+
+# ============ 氛围全主题变量（专家组规范 v1.0 第二节） ============
+# 明暗不只作用于背景：玻璃 α/描边/顶高光/霓虹/文字辅助色全部随 天气×昼夜 联动。
+# Python 侧一次算好成品 token，CSS 只做 var() 消费（禁止 color-mix 推导氛围）。
+_AMB_KIND = {  # 玻璃 α 天气增量（夜档锚 = 0.50 + 增量）
+    "clear": 0.00, "partly": 0.02, "cloudy": 0.04, "fog": 0.06,
+    "snow": 0.08, "rain": 0.14, "heavy_rain": 0.16, "storm": 0.20,
+}
+_TXT2_BRIGHT = "#a9bcdb"
+_TXT2_DIM = "#8fa3c7"
+_TXT3_BRIGHT = "#8b9fbe"
+_TXT3_DIM = "#5c6f96"
+
+
+def ambient_vars(v: dict, kind: str = "") -> dict:
+    """在采样 dict 上补齐氛围 token（就地补键并返回）。kind 为空时按中性天气处理。"""
+    df = clamp(v.get("day_factor", 0.0), 0.0, 1.0)
+    d = 1.0 if df > 0.35 else 0.0  # 双锚：df 低=深宵兜底锚（原静态色）；高=白昼提亮锚
+    card = 0.50 + _AMB_KIND.get(kind, 0.0) + 0.06 * df
+    v["bg_color"] = bg_color_for(kind, df)
+    v["amb_card"] = clamp(card, 0.46, 0.74)
+    v["amb_line"] = clamp(0.10 * v.get("glow_c", 0.85), 0.05, 0.12)
+    v["amb_hi"] = clamp(0.05 * (1.6 - df), 0.03, 0.08)
+    v["amb_glow"] = clamp(v.get("glow_c", 1.0), 0.3, 1.0)
+    v["amb_acc"] = "#7ce8ee" if d else "#00f0ff"   # 白昼 accent 提亮降饱和，防暗底高饱和刺眼
+    v["amb_mag"] = "#ff9ab8" if d else "#ff2a6d"
+    v["txt2"] = _TXT2_BRIGHT if d else _TXT2_DIM
+    v["txt3"] = _TXT3_BRIGHT if d else _TXT3_DIM
+    v["scan_a"] = 0.006 if d else 0.011
+    return v
