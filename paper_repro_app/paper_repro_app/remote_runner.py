@@ -1160,10 +1160,10 @@ def inject_public_key(
             username=user_value,
             port=int(port_value) if port_value.isdigit() else 22,
             password=password or None,
-            key_filename=key_value or None,
+            key_filename=None if password else (key_value or None),
             timeout=timeout,
-            allow_agent=True,
-            look_for_keys=True,
+            allow_agent=not bool(password),
+            look_for_keys=not bool(password),
         )
         _stdin, stdout, stderr = ssh.exec_command(remote_cmd, timeout=timeout)
         out = (stdout.read().decode("utf-8", errors="replace") or "").strip()

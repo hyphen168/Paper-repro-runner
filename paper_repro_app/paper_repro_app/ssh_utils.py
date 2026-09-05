@@ -375,6 +375,7 @@ def ssh_connect(profile: dict, timeout: float = 12.0):
     """统一真实连接入口（paramiko 凭据握手）。认证类异常原样上抛；其它异常包装后上抛。
 
     返回已连接的 SSHClient；调用方负责 close()。
+    凭据策略：有密码时只走密码认证（禁用 agent/私钥试探，避免无效公钥尝试触发风控/吞尝试次数）。
     """
     try:
         import paramiko
@@ -387,20 +388,33 @@ def ssh_connect(profile: dict, timeout: float = 12.0):
         key_path = ensure_ssh_key_file(key_path) or key_path
     has_key = bool(key_path and os.path.isfile(os.path.expanduser(key_path)))
     password = profile.get("password") or ""
-    kwargs = {
-        "hostname": profile.get("host"),
-        "username": profile.get("user") or "root",
-        "port": int(profile.get("port") or 22),
-        "timeout": timeout,
-        "banner_timeout": min(20.0, timeout + 8),
-        "auth_timeout": min(20.0, timeout + 8),
-        "allow_agent": not has_key and not password,
-        "look_for_keys": not has_key and not password,
-    }
-    if has_key:
-        kwargs["key_filename"] = os.path.expanduser(key_path)
     if password:
-        kwargs["password"] = password
+        # 有密码：纯密码认证，避免公钥/agent 先行试探
+        kwargs = {
+            "hostname": profile.get("host"),
+            "username": profile.get("user") or "root",
+            "port": int(profile.get("port") or 22),
+            "password": password,
+            "timeout": timeout,
+            "banner_timeout": min(20.0, timeout + 8),
+            "auth_timeout": min(20.0, timeout + 8),
+            "allow_agent": False,
+            "look_for_keys": False,
+            "key_filename": None,
+        }
+    else:
+        kwargs = {
+            "hostname": profile.get("host"),
+            "username": profile.get("user") or "root",
+            "port": int(profile.get("port") or 22),
+            "timeout": timeout,
+            "banner_timeout": min(20.0, timeout + 8),
+            "auth_timeout": min(20.0, timeout + 8),
+            "allow_agent": not has_key,
+            "look_for_keys": not has_key,
+        }
+        if has_key:
+            kwargs["key_filename"] = os.path.expanduser(key_path)
     try:
         ssh.connect(**kwargs)
     except Exception:
@@ -558,20 +572,28 @@ def test_ssh_connection(
         try:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            # 纯密码认证：不携带私钥/agent，避免无关公钥试探
             ssh.connect(
                 hostname=host_value,
                 username=user_value,
                 port=int(port_value) if port_value.isdigit() else 22,
                 password=password,
-                key_filename=key_value or None,
+                key_filename=None,
                 timeout=timeout,
-                allow_agent=True,
-                look_for_keys=True,
+                allow_agent=False,
+                look_for_keys=False,
             )
             ssh.close()
             return True, "SSH 密码认证测试成功，软件可以使用该密码连接云服务器。"
         except Exception as exc:
-            return False, f"SSH 密码认证失败：{exc}"
+            reason = str(exc)
+            hint = ""
+            if "Bad authentication type" in reason or "allowed types" in reason:
+                hint = "（服务器未接受当前密码认证方式：请确认密码复制时未带入多余空格/换行；" \
+                       "实例刚重置或换机后需在控制台重新设置密码；连续失败可能触发瞬时风控，稍等 1-2 分钟再试）"
+            elif "NoValidConnections" in reason or "Connection refused" in reason or "timed out" in reason:
+                hint = "（实例可能未开机、地址/端口已变化或网络不通——请到控制台确认实例运行中，并复制最新 SSH 登录指令）"
+            return False, f"SSH 密码认证失败：{exc}{hint}"
 
     if not key_value:
         return False, "未找到有效的 SSH 私钥文件。请使用应用自动生成的私钥，或填写真实私钥路径。"
