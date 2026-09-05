@@ -542,6 +542,22 @@ def sanitize(text: str) -> str:
     return out
 
 
+def run_remote(profile: dict, script: str, timeout: int = 240):
+    """在云端一次性执行一段 bash 脚本（用于 AI 远程修复等）。返回 (退出码, stdout, stderr)。"""
+    ssh = ssh_connect(profile, timeout=min(30, timeout))
+    try:
+        stdin, stdout, stderr = ssh.exec_command("bash -s", timeout=timeout)
+        stdin.write(str(script) + "\n")
+        stdin.flush()
+        stdin.channel.shutdown_write()
+        out = stdout.read().decode("utf-8", errors="replace")
+        err = stderr.read().decode("utf-8", errors="replace")
+        rc = stdout.channel.recv_exit_status()
+        return int(rc) if rc is not None else -1, out, err
+    finally:
+        ssh.close()
+
+
 def resolve_ssh_profile(raw_target: str = "", fallback_host: str = "", fallback_user: str = "", fallback_key: str = "") -> dict[str, str]:
     parsed = parse_ssh_target(raw_target)
     config = parse_ssh_config((parsed.get("host") or fallback_host or "").strip())

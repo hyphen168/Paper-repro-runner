@@ -269,6 +269,117 @@ def _render_failure_card(task_id: str, message: str, diag: dict, raw_result: str
             st.session_state["rp_hint_msg"] = "已按上次成功命令预填（可编辑），请切换到「提交任务」页确认后提交。"
             st.rerun()
 
+    # —— AI 远程修复闭环（诊断后可在云端执行修复命令，危险命令本地硬拦截） ——
+    _render_ai_fix_panel(task_id)
+
+
+def _render_ai_fix_panel(task_id: str) -> None:
+    """失败任务上的 AI 修复：生成方案 → 安全扫描展示 → 确认 → 云端执行 → 提示重跑。"""
+    try:
+        from paper_repro_app.remote_fix import build_remote_script, parse_fix_plan, safety_scan
+        from paper_repro_app.ssh_utils import run_remote
+        from paper_repro_app.paths import APP_HOME
+    except Exception:
+        return
+    try:
+        store = TaskStore(DATA_DB_PATH)
+        task = store.get_task(task_id)
+    except Exception:
+        return
+    if not task:
+        return
+    _cfg = ai_load()
+    if not (_cfg.get("api_key") and _cfg.get("base_url") and _cfg.get("model")):
+        return
+    with st.expander("🤖 AI 远程修复（诊断后执行云端修复命令，需你确认）", expanded=False):
+        st.caption("AI 只生成方案；每条命令先经本地安全检查，危险操作（删系统/关机/改口令等）一律拦截；确认后才在你这个任务的云端仓库目录+环境内执行。")
+        _plan_key = f"fix_plan_{task_id}"
+        _plan = st.session_state.get(_plan_key) or {}
+        _b1, _b2 = st.columns([1, 1])
+        with _b1:
+            if st.button("🤖 AI 生成修复方案", key=f"ai_fix_gen_{task_id}", use_container_width=True):
+                with st.spinner("AI 正在分析日志并生成云端修复命令…（约 10-40 秒）"):
+                    _repo = str(task.get("repo_url") or "")
+                    _host = str(task.get("host") or "")
+                    _log_tail = str(task.get("log") or "")[-2500:]
+                    ctx = sanitize_for_llm(
+                        f"任务 {task_id} 失败（仓库 {_repo}，云端 {_host}）。\n任务日志尾部：\n{_log_tail}\n"
+                        "请诊断并给出可在该任务云端仓库目录内执行的修复命令。"
+                    )
+                    sys_prompt = (
+                        "你是论文复现助手的安全修复专家。基于用户提供的中文日志，输出：\n"
+                        "1) reason：一两句中文原因；\n2) commands：修复命令数组，仅允许以下类别：\n"
+                        "   - python / pip / conda 安装或脚本（pip 可带 --index-url 清华/阿里镜像）\n"
+                        "   - 在仓库内读写文件（sed/python/shell，路径仅限仓库相对路径）\n"
+                        "   - git pull/fetch/reset 等仓库内操作\n"
+                        "严禁：rm -rf /、系统级改动、改密码、下载即执行、全局 git config、关机重启。\n"
+                        "只输出一个 JSON（不要多余文字）：{\"reason\": \"…\", \"commands\": [\"cmd1\", \"cmd2\"]}"
+                    )
+                    _ok, _reply = chat_once(
+                        [{"role": "system", "content": sys_prompt}, {"role": "user", "content": ctx}],
+                        _cfg["base_url"], _cfg["api_key"], _cfg["model"],
+                        max_tokens=TIER_SPEC.get(_cfg.get("thinking", "standard"), TIER_SPEC["standard"])["max_tokens"],
+                        provider=_cfg.get("provider", ""), tier=_cfg.get("thinking", "standard"),
+                    )
+                    if _ok:
+                        _plan = parse_fix_plan(_reply)
+                        st.session_state[_plan_key] = _plan
+                        st.success("方案已生成（命令需经安全扫描后由你确认执行）。")
+                    else:
+                        st.error("AI 生成失败：" + str(_reply)[:200])
+        if _plan.get("commands"):
+            _allowed, _blocked = safety_scan(_plan.get("commands"))
+            st.markdown("**诊断**：" + str(_plan.get("reason") or ""))
+            st.markdown("**将执行的修复命令（安全扫描通过）**：")
+            st.code("\n".join("> " + c for c in _allowed) or "（无）", language="bash")
+            if _blocked:
+                st.warning("已拦截 " + str(len(_blocked)) + " 条危险/越权命令：" +
+                           "；".join(f"{b['command'][:60]}（{b['reason']}）" for b in _blocked))
+            if _allowed:
+                _repo_dir = str(task.get("remote_workdir") or "").strip()
+                _repo_dir = (_repo_dir.rstrip("/") + "/repo") if _repo_dir else ""
+                _profile = {
+                    "host": str(task.get("host") or ""),
+                    "user": str(task.get("user") or "root"),
+                    "port": int(str(task.get("port") or "22") or 22),
+                    "key_path": str(task.get("ssh_key_path") or ""),
+                    "password": str(_get_exec_state().get("task_passwords", {}).get(task_id) or ""),
+                }
+                with st.popover("▶ 确认执行修复（云端）", key=f"ai_fix_run_{task_id}"):
+                    st.caption(f"将在 {_profile['user']}@{_profile['host']}:{_profile['port']} 的 {_repo_dir or '(仓库目录)'} 内执行。")
+                    if not _profile["password"]:
+                        _fix_pwd = st.text_input("云服务器密码（仅本进程内存）", type="password", key=f"ai_fix_pwd_{task_id}")
+                    else:
+                        _fix_pwd = _profile["password"]
+                    if st.button("确认：在云端执行修复命令", type="primary", key=f"ai_fix_go_{task_id}", use_container_width=True):
+                        if not _profile["password"] and not (_fix_pwd or "").strip():
+                            st.warning("请先填写云服务器密码。")
+                        else:
+                            _profile["password"] = _fix_pwd.strip() if (_fix_pwd or "").strip() else _profile["password"]
+                            script = build_remote_script(_allowed, _repo_dir or "/root", task.get("environment_mode") or "conda")
+                            with st.spinner("正在云端执行修复命令…"):
+                                try:
+                                    rc, out, err = run_remote(_profile, script, timeout=300)
+                                except Exception as exc:
+                                    rc, out, err = -1, "", str(exc)
+                            _transcript = {"at": datetime.now().isoformat(timespec="seconds"),
+                                           "exit": rc, "stdout": out[-3000:], "stderr": err[-1500:]}
+                            st.session_state.setdefault("ai_fix_log", {})[task_id] = _transcript
+                            try:
+                                _dir = Path(str(task.get("local_data_dir") or APP_HOME)).expanduser()
+                                _dir.mkdir(parents=True, exist_ok=True)
+                                (_dir / f"ai-fix-{task_id}.json").write_text(
+                                    json.dumps(_transcript, ensure_ascii=False, indent=2), encoding="utf-8")
+                            except Exception:
+                                pass
+                            st.code(out[-3000:] or err[-1500:], language="bash")
+                            if rc == 0:
+                                st.success("修复命令执行完成（exit 0）。可到「任务监控」重新执行流水线验证。")
+                            else:
+                                st.error(f"修复命令有失败（exit {rc}）：见上方输出；可再次让 AI 生成修复方案。")
+        else:
+            st.caption("尚未生成方案：点击左侧按钮让 AI 先诊断。")
+
 
 def _safe_log_diag(log_analyzer, text: str) -> dict:
     """日志诊断兜底：任何日志内容都不允许让展示层崩溃（解析失败给可读降级结果）。"""
