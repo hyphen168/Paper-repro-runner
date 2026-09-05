@@ -406,6 +406,16 @@ def _interactive_client(host: str, user: str, port, password: str, timeout: floa
     return client
 
 
+def _password_candidates(password: str):
+    """生成待尝试的密码变体：原文 → 去首尾空白（复制粘贴最常见的坑）。"""
+    base = str(password or "")
+    out = [base]
+    for variant in (base.strip(), base.rstrip(), base.lstrip()):
+        if variant and variant not in out:
+            out.append(variant)
+    return out or [base]
+
+
 def connect_with_password(host: str, user: str, port, password: str, timeout: float = 15.0):
     """密码登录总入口：纯密码 → 退避重试 → keyboard-interactive 兜底。
 
@@ -416,38 +426,68 @@ def connect_with_password(host: str, user: str, port, password: str, timeout: fl
     """
     import time as _t
     import paramiko as _pk
-    _BANNER_MARKERS = (
+    _NETWORK_MARKERS = (
         "banner", "WinError 10054", "WinError 10053", "WinError 10061",
         "Connection reset", "Connection aborted", "EOF", "closed", "reset by peer",
-        "[Errno 54]", "[Errno 104]",
+        "[Errno 54]", "[Errno 104]", "NoValidConnections", "Unable to connect",
+        "timed out", "Connection refused", "No route to host", "Network is unreachable",
+        "getaddrinfo", "Name or service not known", "[Errno 110]", "[Errno 113]",
     )
-    last = None
-    banner_like = False
-    for i in range(3):
-        try:
-            return _attempt_password_client(host, user, port, password, timeout)
-        except (_pk.BadAuthenticationType, _pk.AuthenticationException, _pk.SSHException) as exc:
-            last = exc
-            msg = str(exc)
-            if any(m in msg for m in _BANNER_MARKERS):
-                banner_like = True
-            if i < 2:
-                _t.sleep(3 if i == 0 else 6)
-            else:
-                break
-        except Exception:
-            raise
-    if banner_like:
-        raise RuntimeError(
-            f"服务器在握手阶段主动断开/拒绝（{last}）。这通常是：实例正在开机尚未就绪、网络波动，"
-            "或短时间多次登录触发风控。请确认控制台实例为「运行中」，等待 30-60 秒后重试一次（勿连点）。"
-        )
+    _METHOD_MARKERS = ("Bad authentication type", "allowed types", "No acceptable", "method not allowed")
+
+    def _attempt(pw):
+        return _attempt_password_client(host, user, port, pw, timeout)
+
     try:
-        return _interactive_client(host, user, port, password, timeout)
-    except Exception as ike:
+        return _attempt(password)
+    except Exception as exc:  # noqa: BLE001 - 分类后统一处理
+        msg = str(exc)
+
+    # —— 网络/握手级：实例未就绪或风控（banner 重置/不可达等）——短退避再试两次后给出明确提示
+    if any(m in msg for m in _NETWORK_MARKERS):
+        for i in (1, 2):
+            _t.sleep(3 if i == 1 else 6)
+            try:
+                return _attempt(password)
+            except Exception as e2:
+                exc = e2
+                msg = str(e2)
         raise RuntimeError(
-            f"密码认证失败（已自动重试并尝试 keyboard-interactive）：{last or ''} | 交互认证：{ike}"
-        ) from last
+            "服务器握手/网络层连接失败（%s）。这通常是：实例正在开机尚未就绪、地址端口已变化、网络波动，"
+            "或短时间多次登录触发风控。请确认控制台实例为「运行中」且复制最新登录指令，等待 30-60 秒后重试一次（勿连点）。"
+            % exc
+        ) from exc
+
+    # —— 认证方式级：服务器没给可用方法（Bad authentication type / allowed 空）——退避重试后键盘交互兜底
+    if any(m in msg for m in _METHOD_MARKERS) or isinstance(exc, _pk.BadAuthenticationType):
+        for i in (1, 2):
+            _t.sleep(3 if i == 1 else 5)
+            try:
+                return _attempt(password)
+            except Exception as e2:
+                exc = e2
+                msg = str(e2)
+                if not (any(m in msg for m in _METHOD_MARKERS) or isinstance(e2, _pk.BadAuthenticationType)):
+                    break
+        try:
+            return _interactive_client(host, user, port, password, timeout)
+        except Exception as ike:
+            raise RuntimeError(
+                "密码认证方式不被服务器接受（已自动退避重试并尝试 keyboard-interactive）：%s | 交互认证：%s"
+                % (exc, ike)
+            ) from exc
+
+    # —— 凭据级：Authentication failed（密码被拒）——极可能是密码不完整/带空格，自动试变体后再给出精确指引
+    for cand in _password_candidates(password):
+        try:
+            return _attempt(cand)
+        except Exception as e2:
+            exc = e2
+    raise RuntimeError(
+        "密码认证失败：服务器拒绝了该密码（已自动尝试去除首尾空格的变体）。常见原因：密码复制不完整或带了空格、"
+        "大小写或特殊字符（如 +）不符、或不是当前实例最新密码。请到控制台当前实例页重新复制登录密码后重试。原始错误：%s"
+        % exc
+    ) from exc
 
 
 def ssh_connect(profile: dict, timeout: float = 12.0):
