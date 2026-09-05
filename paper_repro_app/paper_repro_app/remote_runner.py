@@ -105,6 +105,14 @@ def parse_ssh_candidates(lines, default_user: str = "root", default_port: int = 
     return candidates
 
 
+def _clean_clone_url(url: Any) -> str:
+    """清洗仓库 URL：去掉粘贴带入的成对引号/首尾空白，避免进入 shell 后成字面引号。"""
+    u = str(url or "").strip()
+    if len(u) >= 2 and u[0] in ('"', "'") and u[-1] == u[0]:
+        u = u[1:-1].strip()
+    return u
+
+
 def _is_auth_exception(exc: BaseException) -> bool:
     """判断是否为 SSH 认证类失败（Authentication failed 一族）。
 
@@ -682,7 +690,7 @@ class RemoteRunner:
             "\"$PYTHON_BIN\" .collect_results.py"
         )
         # 首选/备用源互备：官方 GitHub <-> ghfast.top 加速自动互换（换网络/服务器也稳）
-        raw_url = str(self.clone_url or "").strip()
+        raw_url = _clean_clone_url(self.clone_url or self.repo_url)
         ghfast_prefix = "https://ghfast.top/https://github.com/"
         if raw_url.startswith("https://github.com/") or raw_url.startswith("http://github.com/"):
             alt_url = "https://ghfast.top/" + raw_url
@@ -690,8 +698,10 @@ class RemoteRunner:
             alt_url = "https://github.com/" + raw_url[len(ghfast_prefix):]
         else:
             alt_url = ""
-        clone_source = shlex.quote(raw_url)
-        clone_alt_source = shlex.quote(alt_url) if alt_url else "''"
+        # 模板内 URL 均已用双引号包裹（"@SRC@"）：此处只嵌入“清洗后裸 URL”，绝不再 shlex.quote（
+        # 否则会拼成 "'https://…'" 使 git 收到字面单引号 → protocol ''https' is not supported）
+        clone_source = raw_url
+        clone_alt_source = alt_url
         workdir = shlex.quote(str(self.remote_workdir))
         # —— 拉取代码：fetch 有超时；任一步失败自动清理后整库重克隆（最多两轮）；加速地址与官方源互备 ——
         clone_step = (
