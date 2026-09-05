@@ -243,7 +243,8 @@ def _run_pipeline_in_background(task_id: str) -> None:
             repo_dir=None,
         )
         result["analysis"] = analysis
-        report = generate_repro_report(task, analysis)
+        # 所有产物统一写到用户选择的本地输出目录（storage_layout 由该目录生成）
+        report = generate_repro_report(task, analysis, output_dir=storage_layout["reports"])
         project_summary = generate_project_summary(task, analysis, report["report_path"])
         collected_metrics = result.get("metrics", {})
         comparison_table = build_comparison_table(result, task)
@@ -254,7 +255,7 @@ def _run_pipeline_in_background(task_id: str) -> None:
         payload = json.dumps(result, ensure_ascii=False, indent=2)
         status = result.get("status", "unknown")
         store.update_task_status(task_id, status, payload, current_step=status)
-        artifact_store = ArtifactCollector()
+        artifact_store = ArtifactCollector(base_dir=storage_layout["artifacts"])
         artifact_store.collect(task_id, result)
         persist_task_artifacts(task, result, storage_layout, report, project_summary)
     except Exception as exc:  # 结果整理失败不影响主体执行结论
