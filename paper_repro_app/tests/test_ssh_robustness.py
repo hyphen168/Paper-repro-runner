@@ -53,6 +53,46 @@ def test_test_ssh_connection_normalizes_raw_command():
     assert isinstance(msg, str) and len(msg) < 500
 
 
+def test_parse_ssh_config_no_match_returns_empty_not_crash(tmp_path, monkeypatch):
+    """~/.ssh/config 存在但没有目标主机 Host 块 → 返回 {}，绝不 IndexError。"""
+    cfg = tmp_path / "config"
+    cfg.write_text(
+        "Host papercloud\n  HostName connect.cqa1.seetacloud.com\n  User root\n  Port 34367\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "paper_repro_app.ssh_utils.get_ssh_config_path", lambda: cfg)
+    out = ssh_mod.parse_ssh_config("connect.other.example.com")
+    assert out == {}
+
+
+def test_parse_ssh_config_matching_host_returns_profile(tmp_path, monkeypatch):
+    cfg = tmp_path / "config"
+    cfg.write_text(
+        "Host papercloud\n  HostName connect.cqa1.seetacloud.com\n  User root\n  Port 13150\n"
+        "  IdentityFile ~/.ssh/id_ed25519\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "paper_repro_app.ssh_utils.get_ssh_config_path", lambda: cfg)
+    out = ssh_mod.parse_ssh_config("connect.cqa1.seetacloud.com")
+    assert out.get("host") == "connect.cqa1.seetacloud.com"
+    assert out.get("port") == "13150"
+
+
+def test_resolve_ssh_profile_typing_new_server_no_crash(tmp_path, monkeypatch):
+    """输入新服务器 ssh 命令 + 配置文件只含旧机器 → 正常回落，不抛 IndexError。"""
+    cfg = tmp_path / "config"
+    cfg.write_text("Host papercloud\n  HostName old.example.com\n  User root\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "paper_repro_app.ssh_utils.get_ssh_config_path", lambda: cfg)
+    profile = ssh_mod.resolve_ssh_profile(
+        "ssh -p 13150 root@connect.new.example.com",
+        fallback_host="", fallback_user="", fallback_key="",
+    )
+    assert profile["host"] == "connect.new.example.com"
+    assert profile["port"] == "13150"
+    assert profile["user"] == "root"
 def test_comparison_rows_persisted_into_result(tmp_path, monkeypatch):
     """build_comparison_table 后 result 里应带结构化 comparison_rows（供对比图）。"""
     monkeypatch.setattr(su, "DB_PATH", tmp_path / "tasks.db")

@@ -114,10 +114,12 @@ def parse_ssh_config(host_hint: str = "") -> dict[str, str]:
         if target_host in hosts or target_host == current.get("hostname", "").lower():
             profile = current
 
-    if not profile and target_host:
-        profile = {}
+    # 无匹配档案（配置文件存在但没有该主机的 Host 块）：安全返回空 dict，绝不触发 IndexError
+    if not profile:
+        return {}
 
-    hostname = profile.get("hostname") or profile.get("host_aliases", "").split()[0]
+    _host_aliases = (profile.get("host_aliases") or "").split()
+    hostname = profile.get("hostname") or (_host_aliases[0] if _host_aliases else "")
     resolved = {
         "host": hostname,
         "user": profile.get("user", ""),
