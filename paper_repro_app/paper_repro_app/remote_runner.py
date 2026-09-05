@@ -307,7 +307,7 @@ class RemoteRunner:
             "_cu_ok=0; "
             "for _cu in https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu128 https://mirrors.aliyun.com/pytorch-wheels/cu128 https://download.pytorch.org/whl/cu128; do "
             "echo \"--- 正在从 $_cu 安装 torch/torchvision（国内镜像优先，单源限时 420 秒）...\"; "
-            "if timeout 420 \"$PYTHON_BIN\" -m pip install --disable-pip-version-check --prefer-binary --index-url \"$_cu\" torch torchvision >/tmp/torch_install.log 2>&1 && \"$PYTHON_BIN\" -c 'import torch; assert torch.cuda.is_available()' >/dev/null 2>&1; then "
+            "if timeout 420 \"$PYTHON_BIN\" -m pip install --disable-pip-version-check --prefer-binary --index-url \"$_cu\" torch torchvision && \"$PYTHON_BIN\" -c 'import torch; assert torch.cuda.is_available()' >/dev/null 2>&1; then "
             "echo \"CUDA torch 安装完成（源：$_cu）\"; tail -12 /tmp/torch_install.log; _cu_ok=1; break; fi; "
             "tail -6 /tmp/torch_install.log 2>/dev/null || true; "
             "echo \"源 $_cu 失败或非 CUDA 版，切换下一个...\"; "
@@ -412,7 +412,7 @@ class RemoteRunner:
             "\"$PYTHON_BIN\" -m pip uninstall -y torch torchvision >/dev/null 2>&1 || true; "
             "_cu_ok=0; "
             "for _cu in https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu128 https://mirrors.aliyun.com/pytorch-wheels/cu128 https://download.pytorch.org/whl/cu128; do "
-            "if timeout 420 \"$PYTHON_BIN\" -m pip install --disable-pip-version-check --prefer-binary --index-url \"$_cu\" torch torchvision >/tmp/torch_inst.log 2>&1 && \"$PYTHON_BIN\" -c 'import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)' >/dev/null 2>&1; then "
+            "if timeout 420 \"$PYTHON_BIN\" -m pip install --disable-pip-version-check --prefer-binary --index-url \"$_cu\" torch torchvision && \"$PYTHON_BIN\" -c 'import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)' >/dev/null 2>&1; then "
             "echo \"CUDA torch 安装完成（源：$_cu）\"; tail -6 /tmp/torch_inst.log; _cu_ok=1; break; fi; "
             "echo \"源 $_cu 失败，切换下一个...\"; done; "
             "if [ \"$_cu_ok\" != 1 ]; then echo \"CUDA torch 安装失败（两个源均不可用）。请检查云端网络后重试。\"; exit 1; fi; "
@@ -464,7 +464,7 @@ class RemoteRunner:
             "\"$PYTHON_BIN\" -m pip uninstall -y torch torchvision >/dev/null 2>&1 || true; "
             "_cu_ok=0; "
             "for _cu in https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu128 https://mirrors.aliyun.com/pytorch-wheels/cu128 https://download.pytorch.org/whl/cu128; do "
-            "if timeout 420 \"$PYTHON_BIN\" -m pip install --disable-pip-version-check --prefer-binary --index-url \"$_cu\" torch torchvision >/tmp/torch_dep.log 2>&1 && \"$PYTHON_BIN\" -c 'import torch; assert torch.cuda.is_available()' >/dev/null 2>&1; then "
+            "if timeout 420 \"$PYTHON_BIN\" -m pip install --disable-pip-version-check --prefer-binary --index-url \"$_cu\" torch torchvision && \"$PYTHON_BIN\" -c 'import torch; assert torch.cuda.is_available()' >/dev/null 2>&1; then "
             "echo \"CUDA torch 安装完成（源：$_cu）\"; tail -6 /tmp/torch_dep.log; _cu_ok=1; break; fi; "
             "echo \"源 $_cu 失败或非 CUDA 版，切换下一个...\"; done; "
             "if [ \"$_cu_ok\" != 1 ]; then echo 'torch CUDA 自动补装失败：两个源均不可用。请检查云端网络后重试。'; exit 1; fi; "
@@ -960,18 +960,30 @@ class RemoteRunner:
                     stdin.channel.shutdown_write()
                     channel = stdout.channel
                     step_output: List[str] = []
+                    _prog_last = {"t": 0.0}
+
+                    def _on_chunk(chunk: str) -> None:
+                        """真实多行日志实时转发；纯 \r 进度条每 ~12s 采样一次，避免刷屏/刷爆任务日志。"""
+                        step_output.append(chunk)
+                        if not chunk:
+                            return
+                        if "\n" in chunk:
+                            if on_step:
+                                on_step(step_id, step_title, chunk)
+                            return
+                        now = time.monotonic()
+                        if "\r" in chunk and now - _prog_last["t"] >= 12.0:
+                            _prog_last["t"] = now
+                            segs = [p for p in chunk.split("\r") if p.strip()]
+                            if segs and on_step:
+                                on_step(step_id, step_title, "[下载进度] " + segs[-1].strip()[:160])
+
                     deadline = time.monotonic() + self.command_timeout
                     while not channel.exit_status_ready():
                         if channel.recv_ready():
-                            chunk = channel.recv(4096).decode("utf-8", errors="replace")
-                            step_output.append(chunk)
-                            if on_step:
-                                on_step(step_id, step_title, chunk)
+                            _on_chunk(channel.recv(4096).decode("utf-8", errors="replace"))
                         if channel.recv_stderr_ready():
-                            chunk = channel.recv_stderr(4096).decode("utf-8", errors="replace")
-                            step_output.append(chunk)
-                            if on_step:
-                                on_step(step_id, step_title, chunk)
+                            _on_chunk(channel.recv_stderr(4096).decode("utf-8", errors="replace"))
                         if time.monotonic() >= deadline:
                             channel.close()
                             msg = f"{step_title} 超过 {self.command_timeout // 60} 分钟仍未完成。"
