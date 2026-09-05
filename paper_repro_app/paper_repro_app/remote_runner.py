@@ -113,6 +113,20 @@ def _clean_clone_url(url: Any) -> str:
     return u
 
 
+def _unwrap_ghfast(url: str) -> str:
+    """剥离任意数量 ghfast.top 前缀，还原官方 URL（幂等，杜绝 ghfast 套 ghfast → 403）。"""
+    u = str(url or "").strip()
+    while True:
+        low = u.lower()
+        if low.startswith("https://ghfast.top/https://"):
+            u = u[len("https://ghfast.top/"):]
+        elif low.startswith("https://ghfast.top/http://"):
+            u = u[len("https://ghfast.top/"):]
+        else:
+            break
+    return u
+
+
 def _is_auth_exception(exc: BaseException) -> bool:
     """判断是否为 SSH 认证类失败（Authentication failed 一族）。
 
@@ -691,16 +705,20 @@ class RemoteRunner:
         )
         # 首选/备用源互备：官方 GitHub <-> ghfast.top 加速自动互换（换网络/服务器也稳）
         raw_url = _clean_clone_url(self.clone_url or self.repo_url)
+        # 先剥掉任意层加速前缀（防止历史保存/粘贴已含 ghfast 导致 ghfast 套 ghfast → 403）
+        base_url = _unwrap_ghfast(raw_url)
         ghfast_prefix = "https://ghfast.top/https://github.com/"
-        if raw_url.startswith("https://github.com/") or raw_url.startswith("http://github.com/"):
-            alt_url = "https://ghfast.top/" + raw_url
-        elif raw_url.startswith(ghfast_prefix):
-            alt_url = "https://github.com/" + raw_url[len(ghfast_prefix):]
+        if base_url.startswith(ghfast_prefix):  # 理论上已被剥净，再兜底一次
+            base_url = _unwrap_ghfast(base_url)
+        if base_url.startswith("https://github.com/") or base_url.startswith("http://github.com/"):
+            primary_url = "https://ghfast.top/" + base_url   # 加速源为主，国内机更快
+            alt_url = base_url                                 # 官方为备
         else:
+            primary_url = base_url
             alt_url = ""
         # 模板内 URL 均已用双引号包裹（"@SRC@"）：此处只嵌入“清洗后裸 URL”，绝不再 shlex.quote（
         # 否则会拼成 "'https://…'" 使 git 收到字面单引号 → protocol ''https' is not supported）
-        clone_source = raw_url
+        clone_source = primary_url
         clone_alt_source = alt_url
         workdir = shlex.quote(str(self.remote_workdir))
         # —— 拉取代码：fetch 有超时；任一步失败自动清理后整库重克隆（最多两轮）；加速地址与官方源互备 ——

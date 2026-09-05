@@ -6,6 +6,20 @@ from typing import Any, Dict, List
 import requests
 from bs4 import BeautifulSoup
 
+def _unwrap_accel(url: str) -> str:
+    """剥离任意层 ghfast.top 前缀（幂等）。"""
+    u = str(url or "").strip()
+    while True:
+        low = u.lower()
+        if low.startswith("https://ghfast.top/https://"):
+            u = u[len("https://ghfast.top/"):]
+        elif low.startswith("https://ghfast.top/http://"):
+            u = u[len("https://ghfast.top/"):]
+        else:
+            break
+    return u
+
+
 try:
     from paper_repro_app.logging_config import get_logger
     logger = get_logger("repo_crawler")
@@ -140,8 +154,8 @@ class AutoRepoDatasetCrawler:
 
         # 1. If explicit user hint provided, give highest priority (unless it's a dummy placeholder)
         if user_repo_hint.strip() and "your-username" not in user_repo_hint:
-            hint_url = user_repo_hint.strip()
-            # Generate accelerated clone mirrors
+            hint_url = _unwrap_accel(user_repo_hint.strip())
+            # Generate accelerated clone mirrors（先剥净已含的加速前缀，杜绝 ghfast 套 ghfast → 403）
             gh_proxy = f"https://ghfast.top/{hint_url}" if "github.com" in hint_url else hint_url
             all_candidates.append({
                 "name": "用户指定仓库",
@@ -165,7 +179,7 @@ class AutoRepoDatasetCrawler:
         for item in gh_results + gt_results:
             # Add accelerated clone mirror for GitHub
             if "github.com" in item["repo_url"] and not item.get("accelerated_url"):
-                item["accelerated_url"] = f"https://ghfast.top/{item['repo_url']}"
+                item["accelerated_url"] = f"https://ghfast.top/{_unwrap_accel(item['repo_url'])}"
             all_candidates.append(item)
 
         # 4. Sort by score descending
