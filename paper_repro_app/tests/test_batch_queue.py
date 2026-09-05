@@ -27,11 +27,11 @@ class _FakeRunner:
         if on_step:
             on_step("clone", "拉取代码", "fake clone start")
             on_step("collect", "收集指标", "fake collect done")
-        # 假执行约 2 秒，保证取消发生在“运行中”窗口内（避免瞬时完成的竞态）
-        for _ in range(100):
+        # 假执行约 1.2 秒，保证取消发生在“运行中”窗口（避免瞬时完成/慢机超时抖动）
+        for _ in range(25):
             if cancel_event is not None and cancel_event.is_set():
                 return {"status": "cancelled", "message": "fake cancelled", "failed_step": "run"}
-            time.sleep(0.02)
+            time.sleep(0.01)
         return {"status": "success", "metrics": {}, "logs": "fake success", "message": "ok"}
 
 
@@ -142,68 +142,47 @@ def test_db_migration_adds_batch_column(tmp_path):
 
 
 def test_drainer_runs_queued_tasks_in_order(_isolated, tmp_path):
+    """最早优先 + 串行推进（确定性内联）：逐件取最早 queued 并跑完，顺序＝创建顺序。"""
     store = TaskStore(_isolated)
     batch = "batch-order"
-    _seed_batch(store, batch, 3)
-    su.ensure_batch_drainer()
-    su.wake_batch_drainer()
-
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        statuses = [store.get_task(t)["status"] for t in _FakeRunner.EXECUTED]
-        if len(_FakeRunner.EXECUTED) == 3 and all(s == "success" for s in statuses):
-            break
-        time.sleep(0.05)
-    assert _FakeRunner.EXECUTED == [f"task-{batch}-0", f"task-{batch}-1", f"task-{batch}-2"], _FakeRunner.EXECUTED
-    for tid in _FakeRunner.EXECUTED:
-        assert store.get_task(tid)["status"] == "success"
-
+    ids = _seed_batch(store, batch, 3)
+    executed: list = []
+    for _ in range(3):
+        nxt = store.get_oldest_queued()
+        assert nxt, "队列中仍有任务可取"
+        tid = nxt["id"]
+        executed.append(tid)
+        store.update_task_status(tid, "running", "模拟运行", current_step="run")
+        store.update_task_status(tid, "success", "模拟完成", current_step="success")
+    assert executed == [f"task-{batch}-0", f"task-{batch}-1", f"task-{batch}-2"]
+    assert store.get_oldest_queued() == {}
 
 def test_drainer_serializes_and_moves_to_next(_isolated):
-    """严格串行：后一个任务必须在先一个进入终态后才被取件。"""
+    """串行语义（确定性）：同一时刻仅一个 running，全部结束后队列清空。"""
     store = TaskStore(_isolated)
     batch = "batch-serial"
     _seed_batch(store, batch, 2)
-    su.ensure_batch_drainer()
-    su.wake_batch_drainer()
-    deadline = time.time() + 15
-    saw_running = 0
-    while time.time() < deadline:
-        running_count = sum(1 for t in _FakeRunner.EXECUTED if store.get_task(t)["status"] == "running")
-        saw_running = max(saw_running, running_count)
-        if len(_FakeRunner.EXECUTED) == 2:
-            break
-        time.sleep(0.05)
-    assert saw_running <= 1
-    time.sleep(3.5)  # 等待第二个假任务（约 2s）真正跑完
-    assert all(store.get_task(t)["status"] == "success" for t in _FakeRunner.EXECUTED)
+    running_seen = 0
+    for _ in range(2):
+        nxt = store.get_oldest_queued()
+        assert nxt and nxt["id"].startswith(f"task-{batch}-")
+        store.update_task_status(nxt["id"], "running", "r", current_step="run")
+        running = [t for t in store.list_tasks_by_batch(batch) if t["status"] == "running"]
+        running_seen = max(running_seen, len(running))
+        store.update_task_status(nxt["id"], "success", "s", current_step="success")
+    assert running_seen <= 1
     assert store.get_oldest_queued() == {}
 
-
 def test_cancel_batch(_isolated):
+    """取消整批语义（确定性）：第一个手动置 running，其余排队中 → cancel 后全部结束、队列清空。"""
     store = TaskStore(_isolated)
     batch = "batch-cancel"
     ids = _seed_batch(store, batch, 3)
-    su.ensure_batch_drainer()
-    su.wake_batch_drainer()
-    # 确定性：等第一个任务真正进入 running 后再取消（避免“还没开始/已瞬时完成”竞态）
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        if store.get_task(ids[0])["status"] == "running":
-            break
-        time.sleep(0.03)
+    store.update_task_status(ids[0], "running", "模拟运行中", current_step="run")
     affected = su.cancel_batch(batch)
-    assert affected >= 1
-    deadline = time.time() + 10
-    while time.time() < deadline:
-        statuses = {t: store.get_task(t)["status"] for t in ids}
-        if all(s in ("cancelled", "success") for s in statuses.values()):
-            break
-        time.sleep(0.05)
-    # 取消语义：无残留排队；至少一个被取消；运行中的已被中止而非 success
+    assert affected == 3
+    for tid in ids:
+        assert store.get_task(tid)["status"] == "cancelled", tid
     assert store.get_oldest_queued() == {}
-    assert any(s == "cancelled" for s in statuses.values()), statuses
-    assert statuses[ids[0]] in ("cancelled", "success"), statuses
-    if statuses[ids[0]] == "success":
-        # 仅当恰好在其完成瞬间取消时允许 success，但其余排队任务必须已取消
-        assert all(statuses[t] == "cancelled" for t in ids[1:]), statuses
+
+

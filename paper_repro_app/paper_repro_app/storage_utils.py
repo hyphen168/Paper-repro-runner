@@ -184,6 +184,13 @@ def _run_pipeline_in_background(task_id: str) -> None:
     task["password"] = str(_get_exec_state().get("task_passwords", {}).get(task_id) or "")
     # 自动识别候选机（多台候选仅内存传递，不落库；重跑旧任务回落单机）
     task["hosts"] = _get_exec_state().get("task_hosts", {}).get(task_id) or []
+    # 断点续跑 / 命令覆盖（AI 修复后从失败步继续）：仅内存传递
+    _rs = str(_get_exec_state().get("task_resume", {}).get(task_id) or "")
+    if _rs:
+        task["resume_step"] = _rs
+    _ov = _get_exec_state().get("task_override_cmd", {}).get(task_id)
+    if _ov:
+        task["run_command"] = _ov
     cancel_event = _get_exec_state().get("cancel_events", {}).get(task_id)
     runner = RemoteRunner(task)
     live_log: list[str] = []
@@ -206,7 +213,8 @@ def _run_pipeline_in_background(task_id: str) -> None:
         "已开始连接云端。若代码源在 13 秒内无响应，系统会立即提示网络或仓库地址问题。",
     )
     try:
-        result = runner.execute(on_step=on_step, cancel_event=cancel_event)
+        result = runner.execute(on_step=on_step, cancel_event=cancel_event,
+                                resume_from=str(task.get("resume_step") or ""))
     except Exception as exc:  # 兜底：线程内任何异常都必须落库，避免页面永远停留在“运行中”
         result = {"status": "failed", "message": f"流水线执行异常：{exc}"}
         store.update_task_status(task_id, "failed", json.dumps(result, ensure_ascii=False, indent=2), current_step="failed")
@@ -253,16 +261,25 @@ def _run_pipeline_in_background(task_id: str) -> None:
         store.update_task_status(task_id, "failed", f"结果整理阶段异常：{exc}", current_step="failed")
 
 
-def start_pipeline_execution(task_id: str, password: str = "", hosts: list | None = None) -> tuple[bool, str]:
+def start_pipeline_execution(task_id: str, password: str = "", hosts: list | None = None,
+                             resume_step: str = "", run_command: str | None = None) -> tuple[bool, str]:
     """启动后台流水线线程；已有线程存活时拒绝重复启动。
 
     hosts: 自动识别候选（多台机器每行一条），执行时探测选可达者；None 回落任务单机。
+    resume_step: 非空时从该步骤断点续跑（跳过前面已完成步骤）。
+    run_command: 非空时覆盖任务的训练/验证命令（AI 修复场景）。
     """
     state = _get_exec_state()
     thread = state.get("thread")
     if thread is not None and thread.is_alive():
         return False, "已有流水线正在后台运行，请等待其结束后再重试。"
     state.setdefault("task_passwords", {})[task_id] = password or state.get("task_passwords", {}).get(task_id, "")
+    if hosts:
+        state.setdefault("task_hosts", {})[task_id] = hosts
+    if resume_step:
+        state.setdefault("task_resume", {})[task_id] = resume_step
+    if run_command:
+        state.setdefault("task_override_cmd", {})[task_id] = run_command
     if hosts:
         state.setdefault("task_hosts", {})[task_id] = hosts
     state.setdefault("cancel_events", {})[task_id] = threading.Event()

@@ -314,6 +314,9 @@ def _render_ai_fix_panel(task_id: str) -> None:
                         "   - git pull/fetch/reset 等仓库内操作\n"
                         "严禁：rm -rf /、系统级改动、改密码、下载即执行、全局 git config、关机重启。\n"
                         "只输出一个 JSON（不要多余文字）：{\"reason\": \"…\", \"commands\": [\"cmd1\", \"cmd2\"]}"
+                        "若同时存在未采集到指标 / 数据集缺失或降级 / 入口未识别等问题，请在 reason 中一并倒推说明"
+                        "（覆盖：数据集 YAML 缺失或下载失败、未填 data_config、入口命令缺失、未真正执行训练、结果未落盘等），"
+                        "并额外输出 \"resume_from\"（建议续跑步骤，如 dataset/run/collect）与 \"needs_user\"（需用户补充事项数组）；commands 可为空。"
                     )
                     _ok, _reply = chat_once(
                         [{"role": "system", "content": sys_prompt}, {"role": "user", "content": ctx}],
@@ -377,6 +380,48 @@ def _render_ai_fix_panel(task_id: str) -> None:
                                 st.success("修复命令执行完成（exit 0）。可到「任务监控」重新执行流水线验证。")
                             else:
                                 st.error(f"修复命令有失败（exit {rc}）：见上方输出；可再次让 AI 生成修复方案。")
+                # —— 断点续跑：修复后从失败/建议步骤继续（跳过已完成步骤，不再整条重跑） ——
+                _step_order = ["prepare", "clone", "env", "install", "dependencies", "dataset", "verify", "model", "run", "collect"]
+                _rdef = ""
+                try:
+                    _payload0 = json.loads(str(task.get("log") or "{}"))
+                    _rdef = str(_payload0.get("failed_step") or "")
+                except Exception:
+                    pass
+                _rdef = _rdef or str((_plan or {}).get("resume_from") or "") or "run"
+                if _rdef not in _step_order:
+                    _rdef = "run"
+                st.markdown("**断点续跑**（修复后从此步继续；已完成的 clone/装依赖不再重跑）：")
+                _rr1, _rr2 = st.columns([1.2, 2.4])
+                with _rr1:
+                    _resume_sel = st.selectbox("从哪一步继续", _step_order, index=_step_order.index(_rdef), key=f"ai_resume_sel_{task_id}")
+                with _rr2:
+                    _mem_pwd2 = str(_profile.get("password") or "")
+                    _res_pwd = ""
+                    if not _mem_pwd2:
+                        _res_pwd = st.text_input("云服务器密码（续跑用，仅内存）", type="password", key=f"ai_res_pwd_{task_id}")
+                    if st.button("▶ 执行修复并从此步继续跑", type="primary", key=f"ai_fix_resume_{task_id}", use_container_width=True):
+                        _pw3 = _mem_pwd2 or str(_res_pwd or "").strip()
+                        if not _pw3:
+                            st.warning("需要云服务器密码才能续跑。")
+                        else:
+                            if _allowed:
+                                _script2 = build_remote_script(_allowed, _repo_dir or "/root", task.get("environment_mode") or "conda")
+                                with st.spinner("先执行修复命令…"):
+                                    try:
+                                        _rc2, _o2, _e2 = run_remote(_profile, _script2, timeout=300)
+                                    except Exception as exc:
+                                        _rc2, _o2, _e2 = -1, "", str(exc)
+                                st.code((_o2 or _e2)[-1400:], language="bash")
+                                if _rc2 != 0:
+                                    st.error(f"修复命令失败（exit {_rc2}），暂不续跑，可重试或调整方案。")
+                                    st.stop()
+                                st.success("修复命令完成（exit 0）。")
+                            started, msg2 = start_pipeline_execution(task_id, password=_pw3, resume_step=_resume_sel)
+                            if started:
+                                st.success(f"已从 [{_resume_sel}] 断点续跑 → 请到「任务监控」查看实时进度。")
+                            else:
+                                st.warning("续跑未启动：" + str(msg2))
         else:
             st.caption("尚未生成方案：点击左侧按钮让 AI 先诊断。")
 

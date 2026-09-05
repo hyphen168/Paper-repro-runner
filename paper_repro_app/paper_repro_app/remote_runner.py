@@ -782,6 +782,7 @@ class RemoteRunner:
         self,
         on_step: Callable[[str, str, str], None] | None = None,
         cancel_event=None,
+        resume_from: str = "",
     ) -> Dict[str, Any]:
         self._cancel_event = cancel_event
         if cancel_event is not None and cancel_event.is_set():
@@ -937,7 +938,16 @@ class RemoteRunner:
                     transport.set_keepalive(15)
 
                 logs: List[str] = []
-                for step in self.build_pipeline():
+                pipeline = self.build_pipeline()
+                resume_flag = resume_from or str(self.task.get("resume_step") or "")
+                _start_idx = 0
+                if resume_flag:
+                    _ids = [s["id"] for s in pipeline]
+                    _start_idx = _ids.index(resume_flag) if resume_flag in _ids else 0
+                if _start_idx > 0:
+                    self._log.info(
+                        f"断点续跑：跳过 {_start_idx} 个已完成步骤，从 [{pipeline[_start_idx]['id']}] 继续")
+                for step in pipeline[_start_idx:]:
                     if cancel_event is not None and cancel_event.is_set():
                         raise TaskCancelled("任务已被用户取消")
                     step_id = step["id"]
