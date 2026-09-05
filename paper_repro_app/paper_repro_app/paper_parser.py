@@ -80,7 +80,7 @@ def extract_repo_url(paper_url: str) -> Optional[str]:
     if not paper_url or not str(paper_url).strip().lower().startswith(("http://", "https://")):
         return None
     try:
-        response = requests.get(paper_url.strip(), timeout=15)
+        response = requests.get(paper_url.strip(), timeout=8)
         response.raise_for_status()
     except requests.RequestException:
         return None
@@ -99,7 +99,7 @@ def extract_paper_metadata(paper_url: str) -> Dict[str, str]:
     if not paper_url or not str(paper_url).strip().lower().startswith(("http://", "https://")):
         return metadata
     try:
-        response = requests.get(paper_url, timeout=15)
+        response = requests.get(paper_url, timeout=8)
         response.raise_for_status()
     except requests.RequestException:
         return metadata

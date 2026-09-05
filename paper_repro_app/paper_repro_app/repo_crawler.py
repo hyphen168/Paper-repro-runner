@@ -30,27 +30,45 @@ class AutoRepoDatasetCrawler:
         if not paper_url:
             return keywords
 
-        # Extract paper ID or URL tokens
         clean_url = paper_url.strip()
-        arxiv_match = re.search(r"arxiv\.org/(?:abs|pdf)/(\d+\.\d+)", clean_url, re.IGNORECASE)
-        
+        if not clean_url.lower().startswith(("http://", "https://")):
+            return keywords
+        arxiv_id = None
+        m = re.search(r"arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5})", clean_url, re.IGNORECASE)
+        if m:
+            arxiv_id = m.group(1)
+        # arXiv：优先走轻量 export API（免拉整页/大 PDF，超时即用编号兜底）
+        if arxiv_id:
+            try:
+                resp = self.session.get(
+                    f"https://export.arxiv.org/api/query?id_list={arxiv_id}&max_results=1",
+                    timeout=6,
+                )
+                if resp.status_code == 200:
+                    t = re.search(r"<title[^>]*>(.*?)</title>", resp.text, re.S)
+                    if t:
+                        title = t.group(1).strip()
+                        if title and "arxiv.org" not in title.lower():
+                            title = re.sub(r"\[.*?\]", "", title).strip()
+                            if title:
+                                keywords.append(title)
+            except Exception:
+                pass
+            keywords.append(arxiv_id)
+            return [kw for kw in keywords if kw]
+
+        # 其它来源：短超时抓页取标题（失败快速跳过，不阻塞提交）
         try:
-            resp = self.session.get(clean_url, timeout=self.timeout)
+            resp = self.session.get(clean_url, timeout=8)
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, "html.parser")
-                # Title parsing
                 title_tag = soup.find("h1", class_="title") or soup.find("title")
                 if title_tag:
                     title = title_tag.get_text().replace("Title:", "").strip()
-                    # Clean title
                     title = re.sub(r"\[.*?\]", "", title).strip()
                     keywords.append(title)
         except Exception as e:
             logger.warning(f"解析论文标题失败 ({clean_url}): {e}")
-
-        if arxiv_match:
-            keywords.append(arxiv_match.group(1))
-
         return [kw for kw in keywords if kw]
 
     def search_github_candidates(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
@@ -63,7 +81,7 @@ class AutoRepoDatasetCrawler:
         search_url = f"https://api.github.com/search/repositories?q={urllib.parse.quote(clean_query)}&sort=stars&order=desc&per_page={limit}"
 
         try:
-            resp = self.session.get(search_url, timeout=self.timeout)
+            resp = self.session.get(search_url, timeout=min(8, self.timeout))
             if resp.status_code == 200:
                 data = resp.json()
                 for item in data.get("items", []):
@@ -93,7 +111,7 @@ class AutoRepoDatasetCrawler:
         search_url = f"https://gitee.com/api/v5/search/repositories?q={urllib.parse.quote(clean_query)}&order=desc&page=1&per_page={limit}"
 
         try:
-            resp = self.session.get(search_url, timeout=self.timeout)
+            resp = self.session.get(search_url, timeout=min(8, self.timeout))
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, list):

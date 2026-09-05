@@ -1635,9 +1635,13 @@ def render_app() -> None:
                     st.stop()
                 data_split = f"{_s_tr},{_s_va},{_s_te}"
             # Automated crawler engine to evaluate and rank optimal repository and dataset
-            crawler = AutoRepoDatasetCrawler()
-            crawl_results = crawler.evaluate_and_rank_candidates(paper_url, repo_hint)
-            best_candidate = crawl_results.get("best_candidate")
+            st.info("⏳ 正在联网解析论文并匹配代码仓库（约 5-30 秒）。网络不佳时请直接在上方填真实仓库地址后重试，可省去此步。")
+            try:
+                crawler = AutoRepoDatasetCrawler()
+                crawl_results = crawler.evaluate_and_rank_candidates(paper_url, repo_hint)
+            except Exception:
+                crawl_results = {}
+            best_candidate = crawl_results.get("best_candidate") if isinstance(crawl_results, dict) else None
 
             detected_repo = extract_repo_url(paper_url)
             repo_url = (best_candidate.get("repo_url") if best_candidate else None) or resolve_repo_url(repo_hint, detected_repo)
@@ -1645,7 +1649,9 @@ def render_app() -> None:
             effective_clone_url = clone_url.strip() or (best_candidate.get("accelerated_url") if best_candidate else None) or (best_candidate.get("clone_url") if best_candidate else None) or repo_url
 
             if not repo_url:
-                st.error("未识别到可用的论文代码仓库。请在“代码仓库候选”中填写真实 Git 仓库地址后重新提交。")
+                st.error("未识别到可用的论文代码仓库。原因多为：论文站访问超时或该论文暂无公开代码。")
+                st.caption("建议：直接在上方「代码仓库候选」填入真实 Git 地址（如 https://github.com/tonmoy-hossain/Locus）后重新提交，"
+                           "或在确认网络通畅后重试论文链接。")
                 st.stop()
 
             st.toast(f"已定位代码仓库：{repo_url}")
