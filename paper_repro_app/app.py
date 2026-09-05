@@ -1339,8 +1339,9 @@ def render_app() -> None:
                     unsafe_allow_html=True,
                 )
 
-            default_cloud_host = ssh_meta.get("host") or saved.get("cloud_host") or cloud_host.strip()
-            default_cloud_user = ssh_meta.get("user") or saved.get("cloud_user") or cloud_user.strip() or "root"
+            # 换服务器即用：默认值只取「当前表单/本行解析」，绝不回落上次保存的旧机器
+            default_cloud_host = ssh_meta.get("host") or cloud_host.strip()
+            default_cloud_user = ssh_meta.get("user") or cloud_user.strip() or "root"
             default_ssh_alias = saved.get("ssh_alias", "papercloud")
 
         # ============ 卡片 2：运行方式 ============
@@ -1461,6 +1462,9 @@ def render_app() -> None:
             _eff_user = str(_cloud_meta.get("user") or "").strip() or (cloud_user.strip() or default_cloud_user).strip()
             _eff_port = str(_cloud_meta.get("port") or "").strip() or (ssh_port.strip() or "22")
             _eff_key = ssh_key_path.strip() or str(_cloud_meta.get("key_path") or "").strip() or default_ssh_key
+            # 别名只在用户显式填写时使用；表单已有明确主机时绝不回落到旧 papercloud 别名
+            _explicit_host = bool((cloud_host or "").strip() or (ssh_target or "").strip() or _cloud_meta.get("host"))
+            _effective_alias = (ssh_alias or "").strip() if (ssh_alias or "").strip() else ("" if _explicit_host else (default_ssh_alias or "").strip())
             if gen_profile_btn:
                 profile_path = write_ssh_profile(
                     ssh_alias.strip() or "papercloud",
@@ -1477,7 +1481,7 @@ def render_app() -> None:
                     port=_eff_port,
                     key=_eff_key,
                     password=cloud_password,
-                    alias=(ssh_alias or default_ssh_alias).strip() or "papercloud",
+                    alias=_effective_alias,
                 )
                 st.session_state["ssh_health"] = {"ok": bool(ok), "msg": msg}
                 st.rerun()
