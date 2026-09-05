@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "paper-repro-runner"
-version = "2.3.0"
+version = "2.3.1"
 description = "Lightweight paper reproduction automation app with local control and remote cloud execution."
 readme = "README.md"
 requires-python = ">=3.11"
