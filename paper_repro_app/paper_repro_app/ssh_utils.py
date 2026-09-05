@@ -407,25 +407,41 @@ def _interactive_client(host: str, user: str, port, password: str, timeout: floa
 
 
 def connect_with_password(host: str, user: str, port, password: str, timeout: float = 15.0):
-    """密码登录总入口：纯密码 → 退避重试（吞掉“服务刚启动/瞬时风控”的空 allowed 报错）
-    → keyboard-interactive 兜底。返回已认证的 paramiko SSHClient。
+    """密码登录总入口：纯密码 → 退避重试 → keyboard-interactive 兜底。
+
+    分两类失败处理：
+    - 握手/网络级（banner、连接被重置/关闭、EOF）：实例多半启动中或登录风控，短退避后给出明确提示，
+      不做无意义的交互认证（还没到认证阶段）；
+    - 认证级（Bad authentication type / allowed types 空）：服务器已受理但拒绝该方式，退避重试后再交互兜底。
     """
     import time as _t
     import paramiko as _pk
+    _BANNER_MARKERS = (
+        "banner", "WinError 10054", "WinError 10053", "WinError 10061",
+        "Connection reset", "Connection aborted", "EOF", "closed", "reset by peer",
+        "[Errno 54]", "[Errno 104]",
+    )
     last = None
+    banner_like = False
     for i in range(3):
         try:
             return _attempt_password_client(host, user, port, password, timeout)
         except (_pk.BadAuthenticationType, _pk.AuthenticationException, _pk.SSHException) as exc:
             last = exc
             msg = str(exc)
-            # “allowed types 为空/方法不被接受/瞬时认证失败”→ 等服务/风控恢复再试
+            if any(m in msg for m in _BANNER_MARKERS):
+                banner_like = True
             if i < 2:
-                _t.sleep(2 if i == 0 else 4)
+                _t.sleep(3 if i == 0 else 6)
             else:
                 break
         except Exception:
             raise
+    if banner_like:
+        raise RuntimeError(
+            f"服务器在握手阶段主动断开/拒绝（{last}）。这通常是：实例正在开机尚未就绪、网络波动，"
+            "或短时间多次登录触发风控。请确认控制台实例为「运行中」，等待 30-60 秒后重试一次（勿连点）。"
+        )
     try:
         return _interactive_client(host, user, port, password, timeout)
     except Exception as ike:
