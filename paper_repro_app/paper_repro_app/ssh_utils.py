@@ -371,50 +371,101 @@ def classify_conn_error(exc: Exception) -> str:
     return "other"
 
 
+def _attempt_password_client(host: str, user: str, port, password: str, timeout: float):
+    """纯密码认证尝试（不带私钥/agent）。"""
+    import paramiko
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(
+        hostname=host, username=user, port=int(port or 22),
+        password=password, key_filename=None,
+        allow_agent=False, look_for_keys=False,
+        timeout=timeout, banner_timeout=min(20.0, timeout + 8),
+        auth_timeout=min(20.0, timeout + 8),
+    )
+    return ssh
+
+
+def _interactive_client(host: str, user: str, port, password: str, timeout: float):
+    """keyboard-interactive 兜底：部分 SSH 服务仅接受该方式承载密码。"""
+    import paramiko
+    t = paramiko.Transport((host, int(port or 22)))
+    t.banner_timeout = min(20.0, timeout + 8)
+    t.auth_timeout = min(20.0, timeout + 8)
+    t.connect()
+
+    def _handler(title, instructions, prompt_list):
+        return [password for _ in prompt_list]
+
+    try:
+        t.auth_password(user, password)
+    except Exception:
+        t.auth_interactive(user, _handler)
+    client = paramiko.SSHClient()
+    client._transport = t  # 复用已认证 transport，向调用方提供 exec_command 等接口
+    return client
+
+
+def connect_with_password(host: str, user: str, port, password: str, timeout: float = 15.0):
+    """密码登录总入口：纯密码 → 退避重试（吞掉“服务刚启动/瞬时风控”的空 allowed 报错）
+    → keyboard-interactive 兜底。返回已认证的 paramiko SSHClient。
+    """
+    import time as _t
+    import paramiko as _pk
+    last = None
+    for i in range(3):
+        try:
+            return _attempt_password_client(host, user, port, password, timeout)
+        except (_pk.BadAuthenticationType, _pk.AuthenticationException, _pk.SSHException) as exc:
+            last = exc
+            msg = str(exc)
+            # “allowed types 为空/方法不被接受/瞬时认证失败”→ 等服务/风控恢复再试
+            if i < 2:
+                _t.sleep(2 if i == 0 else 4)
+            else:
+                break
+        except Exception:
+            raise
+    try:
+        return _interactive_client(host, user, port, password, timeout)
+    except Exception as ike:
+        raise RuntimeError(
+            f"密码认证失败（已自动重试并尝试 keyboard-interactive）：{last or ''} | 交互认证：{ike}"
+        ) from last
+
+
 def ssh_connect(profile: dict, timeout: float = 12.0):
     """统一真实连接入口（paramiko 凭据握手）。认证类异常原样上抛；其它异常包装后上抛。
 
     返回已连接的 SSHClient；调用方负责 close()。
-    凭据策略：有密码时只走密码认证（禁用 agent/私钥试探，避免无效公钥尝试触发风控/吞尝试次数）。
+    凭据策略：有密码时走 connect_with_password（纯密码＋退避重试＋交互式兜底，杜绝
+    “Bad authentication type / allowed types 为空”类瞬时报错）；无密码才用私钥。
     """
-    try:
-        import paramiko
-    except ImportError as exc:  # pragma: no cover
-        raise RuntimeError("paramiko 未安装") from exc
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    import paramiko
+    password = profile.get("password") or ""
+    host = profile.get("host")
+    user = profile.get("user") or "root"
+    port = profile.get("port") or 22
+    if password:
+        return connect_with_password(host, user, port, password, timeout=timeout)
     key_path = profile.get("key_path") or ""
     if key_path and not os.path.isfile(os.path.expanduser(key_path)):
         key_path = ensure_ssh_key_file(key_path) or key_path
     has_key = bool(key_path and os.path.isfile(os.path.expanduser(key_path)))
-    password = profile.get("password") or ""
-    if password:
-        # 有密码：纯密码认证，避免公钥/agent 先行试探
-        kwargs = {
-            "hostname": profile.get("host"),
-            "username": profile.get("user") or "root",
-            "port": int(profile.get("port") or 22),
-            "password": password,
-            "timeout": timeout,
-            "banner_timeout": min(20.0, timeout + 8),
-            "auth_timeout": min(20.0, timeout + 8),
-            "allow_agent": False,
-            "look_for_keys": False,
-            "key_filename": None,
-        }
-    else:
-        kwargs = {
-            "hostname": profile.get("host"),
-            "username": profile.get("user") or "root",
-            "port": int(profile.get("port") or 22),
-            "timeout": timeout,
-            "banner_timeout": min(20.0, timeout + 8),
-            "auth_timeout": min(20.0, timeout + 8),
-            "allow_agent": not has_key,
-            "look_for_keys": not has_key,
-        }
-        if has_key:
-            kwargs["key_filename"] = os.path.expanduser(key_path)
+    kwargs = {
+        "hostname": host,
+        "username": user,
+        "port": int(port or 22),
+        "timeout": timeout,
+        "banner_timeout": min(20.0, timeout + 8),
+        "auth_timeout": min(20.0, timeout + 8),
+        "allow_agent": not has_key,
+        "look_for_keys": not has_key,
+    }
+    if has_key:
+        kwargs["key_filename"] = os.path.expanduser(key_path)
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
         ssh.connect(**kwargs)
     except Exception:
@@ -566,31 +617,15 @@ def test_ssh_connection(
         return False, "请先填写云服务器地址和用户名（支持整行粘贴 ssh -p 端口 user@host 登录命令）。"
     if password:
         try:
-            import paramiko
-        except ImportError:
-            return False, "无法测试密码登录：缺少 paramiko 依赖。"
-        try:
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            # 纯密码认证：不携带私钥/agent，避免无关公钥试探
-            ssh.connect(
-                hostname=host_value,
-                username=user_value,
-                port=int(port_value) if port_value.isdigit() else 22,
-                password=password,
-                key_filename=None,
-                timeout=timeout,
-                allow_agent=False,
-                look_for_keys=False,
-            )
+            ssh = connect_with_password(host_value, user_value, port_value, password, timeout=timeout)
             ssh.close()
             return True, "SSH 密码认证测试成功，软件可以使用该密码连接云服务器。"
         except Exception as exc:
             reason = str(exc)
             hint = ""
             if "Bad authentication type" in reason or "allowed types" in reason:
-                hint = "（服务器未接受当前密码认证方式：请确认密码复制时未带入多余空格/换行；" \
-                       "实例刚重置或换机后需在控制台重新设置密码；连续失败可能触发瞬时风控，稍等 1-2 分钟再试）"
+                hint = "（已自动退避重试并尝试 keyboard-interactive；若仍报错：请确认密码复制无多余空格/换行、" \
+                       "实例已完全开机、密码为控制台当前实例的最新密码，并避免连续快速重试触发风控）"
             elif "NoValidConnections" in reason or "Connection refused" in reason or "timed out" in reason:
                 hint = "（实例可能未开机、地址/端口已变化或网络不通——请到控制台确认实例运行中，并复制最新 SSH 登录指令）"
             return False, f"SSH 密码认证失败：{exc}{hint}"
